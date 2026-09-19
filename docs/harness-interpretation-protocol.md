@@ -123,6 +123,63 @@
 - 身份认证、授权和业务 Policy；
 - Router 对活动 Workflow 的判断。
 
+### 1.6 模型输出与 Harness 规范结果分层
+
+本文定义的 `Interpretation Result` 是 Harness 校验后的规范结果，不等于要求模型一次生成的完整 JSON。模型使用一个更小的候选结构，Harness 再补充可信上下文、规范化值、证据和执行所需的字段。
+
+模型最小输出只需要表达“用户做了什么”和“用户提到了哪些目标”，例如：
+
+~~~json
+{
+  "interaction_acts": [
+    {
+      "type": "slot_change",
+      "changes": [
+        {
+          "ref": "slots.departure_date",
+          "raw_value": "明天"
+        }
+      ]
+    }
+  ],
+  "business_intents": [
+    {
+      "intent": "cancel_auto_renewal",
+      "entities": []
+    }
+  ],
+  "unmapped_requests": [],
+  "ambiguities": []
+}
+~~~
+
+模型输出不需要生成 `interpretation_version`、`utterance_id`、`interaction_id`、actor、revision、Engine Command，也不强制生成 `candidate_value`、Evidence 字符区间或 Confidence。模型可以提供这些字段作为提示，但 Harness 必须重新校验；缺失的 `candidate_value` 和 Evidence 可以由确定性逻辑补全，缺失的 Confidence 记录为 `null`，不能伪造模型自评。
+
+处理链路是：
+
+~~~text
+模型最小候选
+  → JSON Schema / constrained decoding
+  → Harness 白名单和原文校验
+  → 确定性规范化与证据补全
+  → Interpretation Result
+  → Engine Command / Router Request
+~~~
+
+因此后文的 Interaction Act、Business Intent 和 Evidence 字段表描述的是 Harness 规范结果；模型侧只实现本节规定的最小候选结构。
+
+模型最小候选结构的约束是：
+
+| 候选对象 | 模型必须提供 | Harness 负责补充或校验 |
+|---|---|---|
+| `interaction_acts[].type` | `answer`、`slot_change` 或 `cancel_interaction` | 是否在 `allowed_interaction_acts`，以及是否符合当前 `pending_interaction` |
+| `answer` / `slot_change` 的字段项 | `ref` 和用户原文中的 `raw_value` | Slot 类型、选项、规范 `candidate_value`、Evidence 和最终 Command 字段 |
+| `business_intents[]` | Catalog 中的 `intent` 和可选实体原文 | Intent 白名单、实体白名单、实体规范化、Evidence 和 Router Request 字段 |
+| `unmapped_requests[]` | 用户请求的 `summary` | 原文依据、是否其实可以映射到 Catalog |
+| `ambiguities[]` | 歧义类别、涉及对象和候选提示 | 候选是否真实存在、阻断范围和澄清文案 |
+
+模型侧的字段越少，越适合使用 JSON Schema constrained decoding 或工具调用约束；复杂的跨字段关系仍由 Harness 做确定性校验。
+
 ## 2. 角色与职责
 
 ### 2.1 语言模型
@@ -133,7 +190,7 @@
 - 识别用户对已知 Slot 的更正或修改；
 - 识别用户表达的业务目标；
 - 从原文和允许的上下文中提取候选值；
-- 给出证据、置信度和歧义；
+- 在需要时提供证据、置信度和歧义提示；
 - 报告无法映射到 Intent Catalog 的请求。
 
 语言模型不得决定或生成：
@@ -665,7 +722,23 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 }
 ~~~
 
-例如，当前消息是“我要订机票”，模型可以先输出一个带公共元数据的 Business Intent：
+例如，当前消息是“我要订机票”。模型可以只输出意图 ID 和空实体列表：
+
+~~~json
+{
+  "business_intents": [
+    {
+      "intent": "book_flight",
+      "entities": []
+    }
+  ],
+  "interaction_acts": [],
+  "unmapped_requests": [],
+  "ambiguities": []
+}
+~~~
+
+Harness 校验并补充公共元数据后，形成下面的规范结果：
 
 ~~~json
 {
@@ -691,13 +764,13 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 }
 ~~~
 
-这个结果只说明用户表达了“订机票”这个目标，并记录模型依据了哪段文字、自己有多确定；它不表示已经创建订票 Workflow，也不表示用户已经完成身份验证或提供了完整行程。
+这个规范结果只说明用户表达了“订机票”这个目标，并记录了候选的原文依据和可用的模型置信度；它不表示已经创建订票 Workflow，也不表示用户已经完成身份验证或提供了完整行程。
 
 ### 8.2 顶层字段
 
 | 字段 | 类型 | 必填 | 含义与约束 |
 |---|---|---:|---|
-| interpretation_version | string | 是 | 模型实际采用的结果结构版本，必须与输入版本完全相同 |
+| interpretation_version | string | 是 | Harness 生成的规范结果结构版本；应与本次 Request 使用的协议版本一致 |
 | utterance_id | string | 是 | 必须等于输入的 `utterance.id`，防止异步结果绑定到错误消息 |
 | language | string \| null | 是 | 模型用于理解本条消息的 BCP 47 语言代码；无法可靠判断时为 `null` |
 | interaction_acts | array<interaction-act> | 是 | 对待处理问题或已有 Slot 的动作；没有时为空数组，每项类型必须位于 `allowed_interaction_acts` |
@@ -765,7 +838,7 @@ Evidence 只回答“候选来自哪里”，不回答“候选是否有权限�
 
 ### 9.2 Confidence：模型对映射的自评
 
-`confidence` 是 0 到 1 的模型自评值，表示模型对“这段用户表达对应这个结构化候选”的把握程度。它不是经过校准的概率，也不是 Engine 对业务结果的判断。它只能用于确认、澄清、观测和评估策略。
+当模型提供时，`confidence` 是 0 到 1 的自评值，表示模型对“这段用户表达对应这个结构化候选”的把握程度；模型没有提供且 Harness 无法可靠推导时，规范结果中的值为 `null`。它不是经过校准的概率，也不是 Engine 对业务结果的判断，只能用于确认、澄清、观测和评估策略。
 
 Harness 可以结合 Confidence 制定澄清策略，但阈值和动作属于 Harness Policy，而不是模型自行决定。例如：
 
@@ -817,7 +890,7 @@ Confidence 不得：
 | answers[].ref | slot-ref | 是 | 必须出现在 `pending_interaction.fields` 中 |
 | answers[].raw_value | string | 是 | 用户表达该答案时使用的非空原文片段，例如“明天”或“第一个” |
 | answers[].candidate_value | any | 是 | 按目标 Slot 类型转换后的候选规范值；Harness 仍会重新规范化和校验 |
-| answers[].confidence | number | 是 | 模型自评置信度，范围为闭区间 `[0, 1]`，不提供写入权限 |
+| answers[].confidence | number \| null | 是 | 模型自评置信度；有值时范围为闭区间 `[0, 1]`，模型未提供且 Harness 无法可靠推导时为 `null`，不提供写入权限 |
 | answers[].evidence | evidence | 是 | 支持该答案的消息与原文区间；必须通过第 9.1 节校验 |
 
 `answer` 只能回答当前 ask，不能顺便写入其他 Slot。选项型回答必须匹配 `pending_interaction.options[].value`。
@@ -851,7 +924,7 @@ Confidence 不得：
 | changes[].ref | slot-ref | 是 | 必须存在于 `allowed_slots`，且其 `mutable` 为 `true` |
 | changes[].raw_value | string | 是 | 用户表达新值时使用的非空原文片段 |
 | changes[].candidate_value | any | 是 | 按目标 Slot 类型转换出的候选规范值；Harness 校验通过后才可进入 Engine Command |
-| changes[].confidence | number | 是 | 模型对修改语义和值映射的自评置信度，范围为闭区间 `[0, 1]` |
+| changes[].confidence | number \| null | 是 | 模型对修改语义和值映射的自评置信度；有值时范围为闭区间 `[0, 1]`，缺失时为 `null` |
 | changes[].evidence | evidence | 是 | 支持本次修改的消息与原文区间；必须通过第 9.1 节校验 |
 
 模型不能输出 `invalidates`、`restart_at`、`target_node` 或 Policy。Harness 将全部合法变化合并为一个原子 `slot.change` Command。失效和重算由 Engine 根据 Workflow Definition 的依赖图计算。
@@ -876,7 +949,7 @@ Confidence 不得：
 | 字段 | 类型 | 必填 | 含义与约束 |
 |---|---|---:|---|
 | type | const string | 是 | 固定为 `cancel_interaction` |
-| confidence | number | 是 | 模型对“用户正在放弃当前问题”的自评置信度，范围为闭区间 `[0, 1]` |
+| confidence | number \| null | 是 | 模型对“用户正在放弃当前问题”的自评置信度；有值时范围为闭区间 `[0, 1]`，缺失时为 `null` |
 | evidence | evidence | 是 | 当前消息中表达放弃的原文区间 |
 
 “取消机票订单”属于 `cancel_booking` 一类 Business Intent；“关闭自动续费”属于 `cancel_auto_renewal`。这些目标由 Intent Catalog 识别，再由 Router 调度。
@@ -902,13 +975,13 @@ Confidence 不得：
 | 字段 | 类型 | 必填 | 含义与约束 |
 |---|---|---:|---|
 | intent | string | 是 | 必须等于某个 `intent_catalog[].id`；同一结果数组中不得重复 |
-| confidence | number | 是 | 匹配程度的模型自评值，范围为闭区间 `[0, 1]` |
+| confidence | number \| null | 是 | 匹配程度的模型自评值；有值时范围为闭区间 `[0, 1]`，缺失时为 `null` |
 | evidence | evidence | 是 | 当前 utterance 中明确表达该业务目标的原文区间；不能只引用历史摘要 |
 | entities | array<entity> | 是 | 随该意图提取的实体；没有时为空数组，名称必须位于该 Catalog 条目的 `allowed_entities` |
 | entities[].name | field-ref | 每个 entity 必填 | Intent Catalog `allowed_entities` 中允许的字段 ID |
 | entities[].raw_value | string | 每个 entity 必填 | 用户表达该实体时使用的非空原文片段 |
 | entities[].candidate_value | any | 每个 entity 必填 | 模型转换出的候选值；Router 或 Workflow 仍需按目标字段重新校验 |
-| entities[].confidence | number | 每个 entity 必填 | 模型自评置信度，范围为闭区间 `[0, 1]` |
+| entities[].confidence | number \| null | 每个 entity 必填 | 模型自评置信度；有值时范围为闭区间 `[0, 1]`，缺失时为 `null` |
 | entities[].evidence | evidence | 每个 entity 必填 | 支持该实体的消息和原文区间 |
 
 以下字段在 Business Intent 中非法：
@@ -951,7 +1024,7 @@ Unmapped Request 只说明模型未在本次 Intent Catalog 中找到可靠映�
 |---|---|---:|---|
 | summary | string | 是 | 用户请求的简短、非空语义摘要；不得添加用户没有表达的目标 |
 | evidence | evidence | 是 | 当前 utterance 中支持该请求的原文区间 |
-| confidence | number | 是 | 模型对摘要是否准确表达该请求的自评值，范围为闭区间 `[0, 1]` |
+| confidence | number \| null | 是 | 模型对摘要是否准确表达该请求的自评值；有值时范围为闭区间 `[0, 1]`，缺失时为 `null` |
 
 ### 12.2 Ambiguity
 
@@ -1060,10 +1133,10 @@ Harness 必须按以下顺序处理模型输出。
 ### 15.1 结构校验
 
 - 输出是完整 JSON 对象；
-- 符合 Interpretation Result Schema；
+- 符合本协议第 1.6 节的 Model Interpretation Schema；
 - 不含未知字段；
-- `interpretation_version` 受支持；
-- `utterance_id` 与 Request 一致。
+- 模型输出不要求包含 `interpretation_version`、`utterance_id`、actor 或 revision；
+- Harness 在校验通过后补充 `interpretation_version`、`utterance_id` 和可信上下文，构造规范的 Interpretation Result。
 
 ### 15.2 白名单与引用校验
 
