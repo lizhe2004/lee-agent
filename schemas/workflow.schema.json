@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/workflow.schema.json",
+  "title": "Customer Support Workflow Definition",
+  "description": "Structural contract for executable customer-support workflows. Graph references and tool registration are checked semantically by the runtime.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "start", "nodes"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional editor association pointing to this workflow schema."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "start": {
+      "$ref": "#/$defs/nodeId"
+    },
+    "description": {
+      "type": "string"
+    },
+    "mutable_inputs": {
+      "type": "object",
+      "propertyNames": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": { "$ref": "#/$defs/mutableInput" }
+    },
+    "nodes": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/nodeId"
+      },
+      "additionalProperties": {
+        "oneOf": [
+          { "$ref": "#/$defs/askNode" },
+          { "$ref": "#/$defs/branchNode" },
+          { "$ref": "#/$defs/actionNode" },
+          { "$ref": "#/$defs/respondNode" },
+          { "$ref": "#/$defs/waitNode" },
+          { "$ref": "#/$defs/endNode" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "mutableInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "on_change", "priority", "invalidates"],
+      "properties": {
+        "type": { "enum": ["string", "number", "integer", "boolean", "object", "array", "null"] },
+        "enum": { "type": "array", "uniqueItems": true, "items": {} },
+        "on_change": { "$ref": "#/$defs/nodeId" },
+        "priority": { "type": "integer", "minimum": 0 },
+        "invalidates": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "baseNodeProperties": {
+      "type": "object",
+      "properties": {
+        "max_visits": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "on_limit": {
+          "$ref": "#/$defs/nodeId"
+        }
+      }
+    },
+    "askNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "collect", "prompt", "next"],
+      "properties": {
+        "type": { "const": "ask" },
+        "collect": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+        },
+        "sensitive_collect": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+        },
+        "prompt": { "type": "string", "minLength": 1 },
+        "next": { "$ref": "#/$defs/nodeId" },
+        "max_visits": { "type": "integer", "minimum": 1 },
+        "on_limit": { "$ref": "#/$defs/nodeId" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["max_visits"] },
+          "then": { "required": ["on_limit"] }
+        }
+      ]
+    },
+    "branchNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "cases", "default"],
+      "properties": {
+        "type": { "const": "branch" },
+        "cases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["when", "next"],
+            "properties": {
+              "when": { "type": "string", "minLength": 1 },
+              "next": { "$ref": "#/$defs/nodeId" }
+            }
+          }
+        },
+        "default": { "$ref": "#/$defs/nodeId" },
+        "max_visits": { "type": "integer", "minimum": 1 },
+        "on_limit": { "$ref": "#/$defs/nodeId" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["max_visits"] },
+          "then": { "required": ["on_limit"] }
+        }
+      ]
+    },
+    "actionNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "tool", "args", "requires", "on_guard_failure", "result_statuses", "transitions"],
+      "properties": {
+        "type": { "const": "action" },
+        "tool": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "args": { "type": "object" },
+        "requires": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "on_guard_failure": { "$ref": "#/$defs/nodeId" },
+        "result_statuses": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+        },
+        "transitions": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "additionalProperties": { "$ref": "#/$defs/nodeId" }
+        },
+        "save_result_as": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "consume_facts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "idempotency_key": { "type": "string" },
+        "max_visits": { "type": "integer", "minimum": 1 },
+        "on_limit": { "$ref": "#/$defs/nodeId" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["max_visits"] },
+          "then": { "required": ["on_limit"] }
+        }
+      ]
+    },
+    "respondNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "template"],
+      "properties": {
+        "type": { "const": "respond" },
+        "template": { "type": "string", "minLength": 1 },
+        "next": { "$ref": "#/$defs/nodeId" },
+        "max_visits": { "type": "integer", "minimum": 1 },
+        "on_limit": { "$ref": "#/$defs/nodeId" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["max_visits"] },
+          "then": { "required": ["on_limit"] }
+        }
+      ]
+    },
+    "waitNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "event"],
+      "properties": {
+        "type": { "const": "wait" },
+        "event": { "type": "string", "minLength": 1 },
+        "next": { "$ref": "#/$defs/nodeId" }
+      }
+    },
+    "endNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "end" }
+      }
+    }
+  }
+}
