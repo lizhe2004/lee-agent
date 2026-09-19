@@ -5,6 +5,8 @@
 
 本文定义一种可移植、可校验、可确定性执行的 Workflow Definition 格式。它面向长期演进，不依赖任何现有代码、存储方案或 Agent 框架。
 
+外部组件如何启动、恢复和修改 Workflow Instance，见 [Workflow Engine 交互协议](./workflow-engine-protocol.md)。
+
 ---
 
 # 第一部分：Definition 语言
