@@ -555,7 +555,67 @@ Intent Catalog 让模型把自然语言映射为稳定的 Business Intent ID。�
 | description | string | 是 | 该业务目标包含和排除范围的直接说明，模型以它作为分类依据 |
 | positive_examples | array<string> | 否 | 属于该意图的典型表达；每项必须非空，不代表只有这些说法才能命中 |
 | negative_examples | array<string> | 否 | 容易混淆但不属于该意图的表达，用于划清相邻意图边界 |
-| allowed_entities | array<string> | 否 | 允许随该意图提取的实体名称白名单；不得重复，省略等同于空数组 |
+| allowed_entities | array<string> | 否 | 允许随该意图提前提取的实体 ID 白名单；每个 ID 必须存在于可信 Entity Registry，不得重复，省略等同于空数组 |
+
+### 7.3 allowed_entities 的用途
+
+`allowed_entities` 控制的是“识别业务意图时，模型可以顺便从当前消息中提取哪些业务对象”，而不是流程运行时可以写入哪些字段。它主要用于意图已经明确、但 Router 在启动或恢复 Workflow 前还需要少量定位信息的场景。
+
+例如：
+
+| Intent | allowed_entities | 用户表达 | 提取结果的用途 |
+|---|---|---|---|
+| `refund_request` | `order_reference` | “帮我退订单 A123” | Router 可以用订单引用查找应该处理的订单，或把它作为退款 Workflow 的启动候选值 |
+| `book_flight` | `origin`、`destination`、`departure_date` | “明天北京飞上海” | Router 可以据此选择机票能力，并把已提取的出发地、到达地和日期交给后续 Workflow 进行类型校验和补问 |
+| `cancel_auto_renewal` | 空数组 | “把自动续费关了” | 该意图不需要预路由实体；Workflow 后续再按账号和身份验证流程确定具体订阅 |
+
+这里的 `order_reference`、`origin` 和 `departure_date` 是实体名称，不是用户实际填写的值，也不是某个 Workflow 的节点 ID。它们必须解析到可信的 Entity Registry。Registry 至少为每个实体提供稳定名称、规范类型或 Schema、规范化器和敏感级别；模型不能自行发明实体类型或解释规则。
+
+`allowed_entities` 的处理顺序是：
+
+1. 模型先根据 `id` 和 `description` 判断 Business Intent；
+2. 仅对该 Intent 的 `allowed_entities` 白名单尝试提取实体；
+3. Harness 校验证据、规范化候选值并检查实体名称是否在白名单中；
+4. Harness 将通过校验的实体放入 `business_intents[].entities`，交给 Router；
+5. Router 决定实体是否用于查找案件、填充新 Workflow 的初始 Slot，或触发补问。
+
+实体缺失不是错误。用户只说“我要退款”时，`refund_request` 可以命中，但 `entities` 为空，Router 再决定是否需要询问订单。实体有多个可能指代时，Harness 应产生 Ambiguity，不能随便选择一个。
+
+`allowed_entities` 不承担以下职责：
+
+- 不代表用户已经通过身份验证或拥有操作权限；
+- 不代表订单满足退款条件、航班仍有余票或订阅确实存在；
+- 不直接写入 Slot、Artifact 或 Runtime State；
+- 不决定使用哪个 Workflow、是否新建流程或是否并行处理；
+- 不替代当前活动 Workflow 的 `allowed_slots`。
+
+`allowed_slots` 描述当前 Workflow 在当前运行阶段允许回答或修改的 Slot；`allowed_entities` 描述路由前为了识别业务目标可以提取的实体。两者即使使用相同名称，也不存在自动映射关系，必须由 Router 或 Workflow Definition 的可信映射明确建立。
+
+### 7.4 Entity Registry 的最小合同
+
+Entity Registry 是受信任的配置目录。Intent Catalog 只引用其中的实体 ID，不在自然语言描述里重新定义类型。每个被 `allowed_entities` 引用的实体至少应有：
+
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| id | string | 是 | 稳定实体 ID，例如 `order_reference`；在 Registry 内唯一 |
+| type | slot-type 或 schema-ref | 是 | 实体候选值的规范类型；Harness 必须使用对应校验器 |
+| description | string | 是 | 给模型和维护者看的非空业务含义；不包含权限或流程跳转指令 |
+| normalizer | string | 是 | 已注册的确定性规范化器 ID；不能是模型临时生成的函数或代码 |
+| sensitive | boolean | 是 | 是否需要脱敏、限制日志和限制上下文传播 |
+
+例如，`order_reference` 可以定义为：
+
+~~~json
+{
+  "id": "order_reference",
+  "type": "string",
+  "description": "用户指向的平台订单编号或可唯一定位订单的公开引用",
+  "normalizer": "order_reference@1",
+  "sensitive": false
+}
+~~~
+
+Registry 只定义实体本身的语义和规范化方式，不定义它要启动哪个 Workflow。实体到 Workflow 初始 Slot 的映射属于 Router 或具体 Workflow 的可信配置。
 
 Intent Catalog 不应包含：
 
