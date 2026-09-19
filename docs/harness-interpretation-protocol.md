@@ -172,7 +172,7 @@
 
 | 候选对象 | 模型必须提供 | Harness 负责补充或校验 |
 |---|---|---|
-| `interaction_acts[].type` | `answer`、`slot_change` 或 `cancel_interaction` | 是否在 `allowed_interaction_acts`，以及是否符合当前 `pending_interaction` |
+| `interaction_acts[].type` | `answer`、`slot_change`、`cancel_interaction` 或 `unable_to_answer` | 是否在 `allowed_interaction_acts`，以及是否符合当前 `pending_interaction` |
 | `answer` / `slot_change` 的字段项 | `ref` 和用户原文中的 `raw_value` | Slot 类型、选项、规范 `candidate_value`、Evidence 和最终 Command 字段 |
 | `business_intents[]` | Catalog 中的 `intent` 和可选实体原文 | Intent 白名单、实体白名单、实体规范化、Evidence 和 Router Request 字段 |
 | `unmapped_requests[]` | 用户请求的 `summary` | 原文依据、是否其实可以映射到 Catalog |
@@ -280,6 +280,7 @@ Interaction Act 描述用户对当前对话交互做了什么：
 | answer | 用户在回答 `pending_interaction` 中正在询问的字段，例如选择某个航班或确认购买 | Harness 校验后生成 `interaction.answer` Engine Command |
 | slot_change | 用户主动更正已经提供的业务变量，例如把出发日期从今天改成明天；它可以发生在确认等后续阶段 | Harness 校验后生成 `slot.change` Engine Command |
 | cancel_interaction | 用户表示不再回答当前这个问题，例如在选择列表时说“算了”；它只关闭当前问题，不等于取消订单或终止整个业务 | Harness 校验后生成 `interaction.cancel` Engine Command |
+| unable_to_answer | 用户明确表示无法提供当前问题所需的信息，例如“不记得订单号了”；它不是取消，Workflow 可以为它配置替代路径 | Harness 校验后生成 `interaction.unable_to_answer` Engine Command |
 
 Interaction Act 与当前 Workflow Instance 的交互上下文有关。
 
@@ -296,9 +297,10 @@ Harness 根据可信的 Definition 和 Runtime State 固定生成下面的映射
 |---|---|---|
 | 包含 `answer` | `answer` | 用户回答当前 ask；Harness 校验答案只填写 `pending_interaction.fields` |
 | 包含 `cancel` | `cancel_interaction` | 用户放弃当前 ask；它不等于取消订单、订阅或整个 Workflow |
+| 包含 `unable_to_answer` | `unable_to_answer` | 用户无法回答当前 ask；Workflow 可以转到补充身份信息、人工处理或其他替代路径 |
 | 不适用 | `slot_change` | 用户修改仍可变的 Slot；这是实例级修改事件，不负责结束当前 ask，也不写入 `request.accepts` |
 
-因此，`answer` 和 `cancel_interaction` 是否可用取决于当前 ask 的 `request.accepts`；`slot_change` 是否可用取决于 `allowed_slots` 中是否存在可修改字段以及相关 Policy。这个映射是 Harness 的确定性规则，不是模型需要推断的业务逻辑。
+因此，`answer`、`cancel_interaction` 和 `unable_to_answer` 是否可用取决于当前 ask 的 `request.accepts`；`slot_change` 是否可用取决于 `allowed_slots` 中是否存在可修改字段以及相关 Policy。这个映射是 Harness 的确定性规则，不是模型需要推断的业务逻辑。
 
 ### 3.2 Business Intent
 
@@ -418,7 +420,7 @@ Interaction Act、Business Intent 和实体都是模型根据用户消息提出�
 | reference_time | datetime | 出现相对日期或时间时 | RFC 3339 基准时刻；“今天”“明天”等表达只能相对它计算 |
 | conversation_context | object | 需要历史语境时 | Harness 选择的历史摘要、最近消息和较早相关消息，用于理解省略和指代 |
 | pending_interaction | object | 系统正在等待用户回答时 | 当前问题的语义描述；没有待回答问题时省略，且不得包含 Engine 内部 ID、节点 ID 或 revision |
-| allowed_interaction_acts | array<enum> | 是 | 本轮允许模型输出的动作类型集合；元素只允许 `answer`、`slot_change`、`cancel_interaction`，不得重复，数组可为空 |
+| allowed_interaction_acts | array<enum> | 是 | 本轮允许模型输出的动作类型集合；元素只允许 `answer`、`slot_change`、`cancel_interaction` 或 `unable_to_answer`，不得重复，数组可为空 |
 | allowed_slots | object<slot-ref, slot-descriptor> | 是 | Slot 完整引用到字段描述的映射；空对象表示本轮不能回答或修改任何 Slot |
 | intent_catalog | array<intent-definition> | 是 | 本轮允许识别的业务目标定义；空数组表示本轮不做业务意图分类 |
 
@@ -935,7 +937,25 @@ Confidence 不得：
 
 模型不能输出 `invalidates`、`restart_at`、`target_node` 或 Policy。Harness 将全部合法变化合并为一个原子 `slot.change` Command。失效和重算由 Engine 根据 Workflow Definition 的依赖图计算。
 
-### 10.3 cancel_interaction
+### 10.3 unable_to_answer
+
+~~~json
+{
+  "type": "unable_to_answer",
+  "reason": "does_not_know",
+  "raw_value": "不记得了"
+}
+~~~
+
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| type | const string | 是 | 固定为 `unable_to_answer` |
+| reason | enum | 是 | 只允许 `does_not_know`、`cannot_provide` 或 `refuses`；它描述无法回答的原因，不是业务失败结论 |
+| raw_value | string | 是 | 用户表达无法回答的非空原文片段 |
+
+`unable_to_answer` 不会写入请求的 Slot，也不等同于 `cancel_interaction`。Harness 只有在当前 ask 的 `request.accepts` 包含 `unable_to_answer` 时，才可以将它编译为 Engine Command；否则应向用户澄清或按该流程定义的安全兜底处理。
+
+### 10.4 cancel_interaction
 
 ~~~json
 {
@@ -959,6 +979,19 @@ Confidence 不得：
 | evidence | evidence | 是 | 当前消息中表达放弃的原文区间 |
 
 “取消机票订单”属于 `cancel_booking` 一类 Business Intent；“关闭自动续费”属于 `cancel_auto_renewal`。这些目标由 Intent Catalog 识别，再由 Router 调度。
+
+### 10.5 短回答示例
+
+假设当前 `pending_interaction` 是一个确认问题，目标字段为 `slots.booking_confirmed`，并且当前 ask 的 `request.accepts` 包含 `answer`、`unable_to_answer` 和 `cancel`。模型的最小输出可以分别是：
+
+| 用户原话 | 模型最小输出中的 Interaction Act | Harness 规范化后的含义 |
+|---|---|---|
+| 是 | `{"type":"answer","answers":[{"ref":"slots.booking_confirmed","raw_value":"是"}]}` | `candidate_value = true`，生成 `interaction.answer` |
+| 否 | `{"type":"answer","answers":[{"ref":"slots.booking_confirmed","raw_value":"否"}]}` | `candidate_value = false`，生成 `interaction.answer` |
+| 不记得了 | `{"type":"unable_to_answer","reason":"does_not_know","raw_value":"不记得了"}` | 不写入 Slot，生成 `interaction.unable_to_answer`，进入流程定义的替代路径 |
+| 算了 | `{"type":"cancel_interaction","raw_value":"算了"}` | 生成 `interaction.cancel`，进入当前 ask 的取消路径 |
+
+这些映射依赖当前问题。比如当前问题是“请提供订单号”，用户说“是”不能自动写成订单号；Harness 应要求澄清。用户说“取消订单”也不是 `cancel_interaction`，而应识别为 `cancel_booking` Business Intent，由 Router 调度订单取消 Workflow。
 
 ## 11. Business Intent
 
@@ -1218,6 +1251,10 @@ Interpretation slot_change
 ### 16.3 cancel_interaction
 
 `cancel_interaction` 编译为 `interaction.cancel`。Harness 使用自己为当前待回答问题保存的真实 `interaction_id`；Engine 根据该 ID 找到对应节点和等待状态。
+
+### 16.4 unable_to_answer
+
+`unable_to_answer` 编译为 `interaction.unable_to_answer`。Harness 使用可信上下文补充真实 `workflow_instance_id`、`interaction_id`、revision 和 actor；模型不得指定替代节点。Engine 根据 ask 的 `on.unable_to_answer` 路径决定是补充询问、改用其他身份验证方式、转人工还是安全结束。
 
 ## 17. Harness 到 Intent Router 的交接
 
@@ -1782,6 +1819,7 @@ Harness 必须返回 `DISALLOWED_SLOT`，不产生 Engine Command。
 |---|---|---|
 | `answer` | 回答当前 ask | Workflow Engine |
 | `slot_change` | 修改允许的 Slot | Workflow Engine |
+| `unable_to_answer` | 无法回答当前 ask，走流程定义的替代路径 | Workflow Engine |
 | `cancel_interaction` | 取消当前 ask | Workflow Engine |
 | `business_intents` | 用户业务目标，不包含流程关系 | Intent Router |
 | `unmapped_requests` | 无法映射到当前 Intent Catalog | Intent Router / 能力发现 |

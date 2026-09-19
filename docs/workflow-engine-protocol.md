@@ -108,7 +108,7 @@ Workflow Engine
 
 Harness 负责：
 
-- 将用户消息解释为 interaction.answer、slot.change 或 interaction.cancel；
+- 将用户消息解释为 interaction.answer、interaction.unable_to_answer、slot.change 或 interaction.cancel；
 - 保存并回传 Engine 发出的 interaction_id；
 - 将 interaction.requested 和 response.produced 转换成用户可理解的内容；
 - 附带真实 actor、channel 和 trace 信息。
@@ -145,6 +145,7 @@ Subworkflow Runner 消费 subworkflow.requested，启动固定版本的子 Workf
 |---|---:|---:|---:|---:|---:|---:|
 | workflow.start | 是 | 否 | 否 | 可选 | 是 | 是 |
 | interaction.answer | 是 | 否 | 否 | 否 | 否 | 否 |
+| interaction.unable_to_answer | 是 | 否 | 否 | 否 | 否 | 可选 |
 | interaction.cancel | 是 | 否 | 否 | 否 | 否 | 是 |
 | slot.change | 是 | 否 | 否 | 可选 | 否 | 可选 |
 | tool.result | 否 | 是 | 否 | 否 | 否 | 否 |
@@ -226,7 +227,7 @@ new_state、decision 和 emissions 必须在同一个逻辑事务中提交。
 | occurred_at | datetime | 是 | 该操作在来源系统实际发生的时间；它用于审计，不代表 Engine 的提交时间 |
 | payload | object | 是 | 与 `type` 对应的专属参数；不同 Command 类型使用不同字段 |
 
-本版本的 `command-type` 是封闭集合：`workflow.start`、`workflow.cancel`、`interaction.answer`、`interaction.cancel`、`slot.change`、`tool.result`、`timer.fired`、`external.event`、`subworkflow.result`。未知类型必须拒绝；扩展 Command 需要新的协议版本或明确的扩展命名空间。
+本版本的 `command-type` 是封闭集合：`workflow.start`、`workflow.cancel`、`interaction.answer`、`interaction.unable_to_answer`、`interaction.cancel`、`slot.change`、`tool.result`、`timer.fired`、`external.event`、`subworkflow.result`。未知类型必须拒绝；扩展 Command 需要新的协议版本或明确的扩展命名空间。
 
 ### 4.3 actor
 
@@ -255,7 +256,7 @@ trace 不参与 Workflow 业务判断。
 
 expected_instance_revision 用于乐观并发控制。它与 Engine 当前实例 revision 不一致时，Command 不得修改状态，Decision 返回 conflict。
 
-interaction.answer、interaction.cancel、slot.change 和 workflow.cancel 必须提供 expected_instance_revision。
+interaction.answer、interaction.unable_to_answer、interaction.cancel、slot.change 和 workflow.cancel 必须提供 expected_instance_revision。
 
 tool.result、timer.fired、external.event 和 subworkflow.result MAY 省略 expected_instance_revision，因为异步发送方不一定知道实例的最新 revision；它们必须通过 invocation_id、timer_id、correlation_key 或 call_id 对当前活动等待做 compare-and-set。若同时提供 expected_instance_revision，则 Engine 也必须校验。关联 ID 过期时，即使 revision 匹配也必须拒绝。
 
@@ -414,6 +415,37 @@ payload 字段：
 |---|---|---:|---|
 | interaction_id | string | 是 | 要关闭的当前活动问题 ID；已回答、撤销或被替代的 ID 必须拒绝 |
 | reason | string | 是 | 稳定的机器原因；用户主动放弃使用 `user_cancelled` |
+
+### 6.3 interaction.unable_to_answer
+
+表示用户明确无法提供当前 ask 所需的信息。它不写入答案，也不等同于取消；Engine 根据 ask 节点的 `on.unable_to_answer` 选择补充询问、替代验证、人工处理或安全结束路径。
+
+~~~json
+{
+  "protocol_version": "0.2",
+  "command_id": "cmd_unable_001",
+  "type": "interaction.unable_to_answer",
+  "workflow_instance_id": "wfi_01J7Y7ZZ",
+  "expected_instance_revision": 8,
+  "actor": {
+    "type": "user",
+    "id": "user_123",
+    "tenant_id": "tenant_a"
+  },
+  "occurred_at": "2026-09-19T10:01:00+08:00",
+  "payload": {
+    "interaction_id": "int_abc",
+    "reason": "does_not_know"
+  }
+}
+~~~
+
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| interaction_id | string | 是 | 当前仍处于等待状态的问题 ID；已回答、撤销或被替代的 ID 必须拒绝 |
+| reason | enum | 是 | 只允许 `does_not_know`、`cannot_provide` 或 `refuses`；它描述用户无法回答的原因 |
+
+Engine 必须验证 `interaction_id`、实例 revision、当前 ask 是否在 `request.accepts` 中声明 `unable_to_answer`，以及对应的 `on.unable_to_answer` 目标是否存在。该 Command 不得修改 request.fields 中的 Slot。
 
 ## 7. Slot 修改 Command
 
@@ -702,6 +734,7 @@ accepted 不代表业务成功，只代表 Command 已被 Engine 接受并确定
     },
     "accepted_commands": [
       "interaction.answer",
+      "interaction.unable_to_answer",
       "interaction.cancel",
       "slot.change"
     ]
@@ -757,6 +790,7 @@ accepted 不代表业务成功，只代表 Command 已被 Engine 接受并确定
     },
     "accepted_commands": [
       "interaction.answer",
+      "interaction.unable_to_answer",
       "interaction.cancel",
       "slot.change"
     ]
@@ -775,7 +809,7 @@ accepted 不代表业务成功，只代表 Command 已被 Engine 接受并确定
 | request.options | array<option> | 是 | `selection` 时至少一项，其他 kind 时为空数组 |
 | request.options[].value | 与目标 Slot 相同 | 每个 option 必填 | Engine 接受的规范提交值；同一选项数组中不得重复 |
 | request.options[].label | string | 每个 option 必填 | 给用户展示的非空文本 |
-| accepted_commands | array<command-type> | 是 | 当前等待状态允许的 Command 类型提示；至少包含 `interaction.answer`，不得重复 |
+| accepted_commands | array<command-type> | 是 | 当前等待状态允许的 Command 类型提示；至少包含 `interaction.answer`，可包含 `interaction.unable_to_answer` 和 `interaction.cancel`，不得重复 |
 
 `request.kind` 的 `fields`、`options` 和 Slot 类型组合约束与 Harness Interpretation Protocol 的 `pending_interaction.kind` 相同：`form` 可有多个字段；`selection` 恰好一个字段且选项非空；`confirmation` 恰好一个 boolean Slot；`text` 恰好一个字段。Harness 复制该语义视图时不得放宽这些约束。
 
@@ -1281,6 +1315,7 @@ B 必须重新读取 pending interaction 或最新 Emission，不能自动把旧
 |---|---|---|
 | workflow.start | start_key | Harness、业务系统、Subworkflow Runner |
 | interaction.answer | interaction_id | Harness |
+| interaction.unable_to_answer | interaction_id | Harness |
 | interaction.cancel | interaction_id | Harness |
 | slot.change | expected_slot_revisions | Harness、可信业务系统 |
 | tool.result | invocation_id | Tool Executor |

@@ -367,7 +367,7 @@ ask 专属字段：
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
 | request | object | 是 | Engine 需要 Harness 向用户表达的问题以及本次允许填写的字段和选项 |
-| on | object | 是 | 用户回答或取消后使用的事件名到下一 Node ID 的映射；每个会结束等待的事件都必须有目标 |
+| on | object | 是 | 用户回答、无法回答或取消后使用的事件名到下一 Node ID 的映射；每个会结束等待的事件都必须有目标 |
 
 request 字段：
 
@@ -377,7 +377,7 @@ request 字段：
 | prompt | string | 是 | Harness 应向用户表达的问题；它只负责说明要回答什么，不能依靠话术隐藏未声明的业务判断 |
 | fields | slot-ref[] | 是 | 本次回答唯一允许写入的 Slot 完整引用，且必须同时出现在当前 Node 的 outputs 中 |
 | options_from | data-ref | `selection` 时 | 生成当前可选项列表的数据引用；它必须存在于 inputs，数据失效后旧选项也随之失效 |
-| accepts | event-type[] | 是 | 当前问题允许以哪些普通交互结果结束，例如回答或放弃；Slot 修改是实例级事件，不写在这里 |
+| accepts | event-type[] | 是 | 当前问题允许以哪些普通交互结果结束：`answer`、`cancel` 或 `unable_to_answer`；Slot 修改是实例级事件，不写在这里 |
 
 `request.kind` 是封闭枚举，不是展示提示。其组合约束如下：
 
@@ -388,9 +388,9 @@ request 字段：
 | confirmation | 恰好一项 | 禁止出现 | 目标 Slot 的 type 必须为 `boolean` |
 | text | 恰好一项 | 禁止出现 | 用户原文最终仍须规范化为目标 Slot 类型 |
 
-`accepts` 至少包含 `answer`，元素只能是 `answer` 或 `cancel` 且不得重复。若包含 `cancel`，`on.cancel` 必须存在。
+`accepts` 至少包含 `answer`，元素只能是 `answer`、`cancel` 或 `unable_to_answer` 且不得重复。若包含某个事件，`on` 中必须存在同名目标；`unable_to_answer` 用于用户明确表示无法提供当前问题所需的信息，不等同于取消。
 
-on 必须覆盖 accepts 中所有会结束本次等待的事件。answer 事件只能写入 request.fields 和 node.outputs 共同声明的 slots，并且写入值必须通过 Slot 类型与来源校验。
+on 必须覆盖 accepts 中所有会结束本次等待的事件。answer 事件只能写入 request.fields 和 node.outputs 共同声明的 slots，并且写入值必须通过 Slot 类型与来源校验。unable_to_answer 事件不得写入 request.fields；它通常进入补充信息、替代验证或人工处理节点。
 
 slot.change 是 Workflow Instance 的全局标准事件，不需要加入 accepts，也不通过 on.modify 跳转。Engine 必须先按第 14 章处理修改、失效和重算。
 
