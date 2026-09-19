@@ -681,11 +681,26 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 - 它是不是新流程，由 Router 结合活动 Workflow 判断；
 - 如果“自动续费”不在 Intent Catalog，模型写入 `unmapped_requests`，不能断言系统不支持。
 
-## 9. Evidence 与 Confidence
+## 9. 结构化候选的证据与置信度
 
-### 9.1 Evidence
+Interpretation Result 中的答案、Slot 修改、实体和业务意图都是模型提出的候选，不是系统已经确认的事实。Harness 需要两类不同的元数据来检查这些候选：
 
-从用户文本提取的 Slot、关键 Interaction Act 和 Business Intent 应包含 Evidence：
+- `evidence` 说明候选来自哪条原始消息、哪一段文字，解决“模型依据了什么”的问题；
+- `confidence` 是模型对这次语义映射的自评，解决“模型自己有多确定”的问题。
+
+它们都不能直接授予权限、改变 Runtime State 或跳过 Engine 校验。`evidence` 是可被 Harness 重新计算和验证的来源信息；`confidence` 只是模型意见，不能当成事实证明。
+
+### 9.1 Evidence：候选的原文依据
+
+从用户文本提取的候选应包含 Evidence。它适用于：
+
+- `answer` 中的字段答案；
+- `slot_change` 中的字段修改；
+- Business Intent 本身；
+- Business Intent 的实体；
+- 需要说明用户表达依据的取消动作或其他 Interaction Act。
+
+Evidence 只回答“候选来自哪里”，不回答“候选是否有权限执行”或“候选是否符合业务条件”。例如，用户说出订单号可以作为 `order_reference` 的 Evidence，但不能证明用户是该订单的所有者，也不能证明订单符合退款条件。
 
 ~~~json
 {
@@ -709,9 +724,20 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 
 默认要求 Business Intent 以当前 utterance 为证据。历史消息可以帮助消解指代，但模型不能只根据历史消息重复产生用户本轮没有表达的业务目标。
 
-### 9.2 Confidence
+### 9.2 Confidence：模型对映射的自评
 
-`confidence` 为 0 到 1 的模型自评值，只能用于确认、澄清、观测和评估策略。它不得：
+`confidence` 是 0 到 1 的模型自评值，表示模型对“这段用户表达对应这个结构化候选”的把握程度。它不是经过校准的概率，也不是 Engine 对业务结果的判断。它只能用于确认、澄清、观测和评估策略。
+
+Harness 可以结合 Confidence 制定澄清策略，但阈值和动作属于 Harness Policy，而不是模型自行决定。例如：
+
+| Evidence | Confidence | 处理含义 |
+|---|---|---|
+| 能定位到原文 | 高 | 候选仍需经过类型、白名单和权限校验；可以进入正常校验流程 |
+| 能定位到原文 | 低 | 可能需要澄清，不能仅凭候选直接提交 Command |
+| 不能定位到原文 | 任意 | 属于未扎根候选，Harness 必须拒绝或要求重新解释 |
+| 原文存在多个合理指代 | 任意 | 产生 Ambiguity，不能用高 Confidence 代替用户选择 |
+
+Confidence 不得：
 
 - 授予写入权限；
 - 跳过类型校验；
