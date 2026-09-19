@@ -1,635 +1,1215 @@
-# Workflow JSON 定义规范
+# Workflow Definition 规范
 
-## 0. 规范结构
+状态：Draft
+规范版本：0.1.0
 
-本文按四层定义 workflow：
+本文定义一种可移植、可校验、可确定性执行的 Workflow Definition 格式。它面向长期演进，不依赖任何现有代码、存储方案或 Agent 框架。
 
-1. **定义层**：workflow、slots、artifacts、nodes、policies，描述可执行规则。
-2. **运行层**：State、当前节点、slot 值、artifact 值和 revision，描述单个案件的实时状态。
-3. **理解层**：Harness/Agent 把用户消息转换为回答、确认、取消或 slot_changes。
-4. **执行层**：Engine 校验、调用工具、写入结果、传播失效并推进节点。
+---
 
-阅读一个字段时，先问它属于哪一层。比如 slots.departure_date.type 是定义层；state.slots.departure_date 是运行层；用户说“改成明天”产生的 slot_changes 是理解层。
+# 第一部分：Definition 语言
 
-本文定义面向未来的 workflow JSON 规范。它和 [`schemas/workflow.schema.json`](../schemas/workflow.schema.json) 的关系是：Schema 负责判断 JSON 结构是否合法；本文说明字段在流程引擎中如何解释、什么时候生效、由谁写入，以及失败时发生什么。当前仓库中的 loader 和 engine 是原型实现，尚未覆盖本文所有目标字段；新增字段必须同步更新 Schema、loader、引擎和测试。
+## 1. 范围与设计原则
 
-## 1. Workflow 是什么
+### 1.1 规范目标
 
-一个 workflow 是一个有向图：
+Workflow Definition 描述：
 
-- `nodes` 是图中的节点。
-- 节点之间通过节点 ID 连接。
-- `current_node` 是某个案件当前所在节点。
-- 引擎从 `start` 开始运行，自动执行不需要用户输入的节点。
-- 遇到 `ask`、`wait` 或 `end` 时暂停本轮运行。
+- 流程接受哪些输入；
+- 流程产生哪些派生结果；
+- 有哪些节点以及节点之间如何迁移；
+- 节点读取和写入哪些数据；
+- 数据之间存在哪些依赖；
+- 输入变化后哪些结果失效；
+- 哪些业务、安全规则必须额外执行；
+- 工具失败、超时和副作用如何处理；
+- 如何调用其他 Workflow。
 
-Workflow 定义的是程序必须遵守的执行规则，不是给模型阅读的长篇 SOP。Skill 可以解释同一流程应该如何和用户沟通，但不能替代 workflow 的门槛。
+### 1.2 非目标
 
-### 1.1 静态定义和动态状态
+本文不定义 Skill、LLM 意图识别、多意图案件调度、数据库结构、工具网络协议、UI、话术或任何现有实现的兼容方式。
 
-系统必须区分所有案件共享的静态 `Workflow Definition` 和每个案件独有的动态 `Workflow State`。
+外部系统可以把用户语言转换成输入修改、确认、取消等事件，但 Workflow Engine 只能执行 Definition 中明确声明的节点、迁移和副作用。
 
-| 对象 | 保存内容 | 生命周期 |
-|---|---|---|
-| Workflow Definition | 节点、跳转、输入输出、字段类型、修改规则、业务守卫、工具绑定 | 由版本管理；案件启动后固定版本 |
-| Workflow State | 当前节点、slots、artifacts、版本号、等待状态、审计事件 | 每个案件独立持久化；每轮消息更新 |
+### 1.3 确定性原则
 
-静态定义回答“流程应该怎么运行”，动态状态回答“这个案件已经运行到哪里”。状态不能反过来修改 workflow 定义。
+对于相同的 Definition、初始状态和事件序列，Engine 必须产生相同的控制流决策和状态变化。外部工具返回值可以不同，但其可接受状态和后续迁移必须由 Definition 约束。
 
-### 1.2 slots 和 artifacts
+### 1.4 规范关键词
 
-`slots` 是用户提供或选择的任务参数，例如出发地、日期、舱位和乘机人。`artifacts` 是节点或工具根据 slots 产生的派生事实，例如航班搜索结果、报价、订单和确认文案。
+- MUST：实现必须满足。
+- MUST NOT：实现禁止执行。
+- SHOULD：除非有明确理由，否则应满足。
+- MAY：可选能力。
 
-```text
-slots:     origin, destination, departure_date, cabin
-               ↓
-artifacts: flight_search → selected_flight → cabin_quote
-```
+### 1.5 Definition 与 Runtime 的边界
 
-同一个名称不能同时作为用户输入和工具输出。用户选择的 `selected_flight_id` 可以是用户拥有的 slot，但它仍然可以声明依赖 `flight_search`；上游搜索失效时，该选择也必须清除。
+Definition 是静态、带版本、不可变的流程合同。Runtime State 是某个 Workflow Instance 的当前值、版本和执行进度。
 
-## 2. 顶层字段
+Definition 不保存当前节点、实际用户值、工具调用结果、revision 或等待事件实例。这些属于 Runtime State。本文只在第三部分定义解释 Definition 所需的抽象运行语义。
 
-示例：
+## 2. 基础语法
 
-```json
-{
-  "$schema": "../schemas/workflow.schema.json",
-  "id": "refund_request",
-  "version": 1,
-  "description": "处理退款请求",
-  "mutable_inputs": {},
-  "start": "collect_order_clues",
-  "nodes": {}
-}
-```
+### 2.1 标识符
 
-| 字段 | 类型 | 必填 | 实际含义 |
-|---|---|---:|---|
-| `$schema` | string | 否 | 编辑器或校验器使用的 Schema 地址。引擎不把它当作流程逻辑。 |
-| `id` | string | 是 | workflow 的稳定标识，例如 `refund_request`。案件启动后会保存这个值。只能使用小写字母、数字和下划线，且以字母开头。 |
-| `version` | integer | 是 | 这份定义的不可变版本号。案件启动时保存版本；恢复旧案件时继续使用旧版本，避免流程更新改变处理中案件的语义。 |
-| `description` | string | 否 | 给维护者看的说明，不影响迁移。 |
-| `start` | node ID | 是 | 新案件第一次执行的节点。必须存在于 `nodes`。 |
-| `nodes` | object | 是 | 节点 ID 到节点定义的映射。每个节点 ID 必须唯一。 |
-| `mutable_inputs` | object | 否 | 声明用户后续可以修改的输入，以及修改后哪些事实失效、从哪里重新计算。见第 6 节。 |
+Workflow、input、artifact、node、policy 的 ID 必须以小写字母开头，只包含小写字母、数字和下划线，并在所属命名空间内唯一。显示名称和自然语言文案不得作为 ID。
 
-Schema 的 `additionalProperties: false` 表示顶层不能随便增加字段。需要增加运行语义时，先更新规范、Schema、loader 和引擎，不要静默接受未知字段。
+### 2.2 引用
 
-面向未来的定义还应增加以下顶层字段：
+数据引用必须包含命名空间：
 
-| 字段 | 实际含义 |
+~~~text
+inputs.origin
+inputs.departure_date
+artifacts.flight_search
+context.workflow_instance_id
+~~~
+
+节点迁移目标直接使用 node ID。合法数据命名空间：
+
+| 命名空间 | 含义 |
 |---|---|
-| `slots` | 用户输入字段的类型、所有者、是否必填、是否允许修改及修改策略。它定义输入契约，不保存具体用户值。 |
-| `artifacts` | 派生事实的声明。每项说明产生它的节点、允许的来源和有效性策略。 |
-| `dependencies` | 可选的显式依赖覆盖。默认依赖由节点的 `inputs` 和 `outputs` 编译得到；该字段用于声明跨节点或外部业务依赖。 |
-| `policies` | 不能从普通数据依赖推导出的业务、安全和风控失效规则。 |
+| inputs | 调用方、用户或外部事件提供的输入 |
+| artifacts | Workflow 执行产生的派生结果 |
+| context | Engine 提供的只读执行上下文 |
 
-这些字段属于目标规范。原型阶段可以继续使用 `mutable_inputs`，但迁移后的正式定义应将它映射到 `slots` 和 `policies`。
+### 2.3 数据类型
 
-### 2.1 顶层字段和运行时字段的对应关系
+规范内置 string、boolean、integer、number、date、datetime、duration、money、phone、email、enum、object 和 array。复杂对象应通过 schema 引用 JSON Schema 或等价的已注册类型。
 
-| 静态定义字段 | 动态 State 字段 | 关系 |
-|---|---|---|
-| slots.departure_date.type | state.slots.departure_date | 前者定义允许什么值，后者保存本案件当前值。 |
-| artifacts.flight_search.producer | state.artifacts.flight_search.value | 前者定义谁能产生结果，后者保存实际结果。 |
-| nodes | state.current_node | 前者定义全部节点，后者保存当前案件所在节点。 |
-| version | workflow_version | State 固定引用启动时的定义版本。 |
-| policies.departure_date | events 中的失效记录 | 前者定义规则，后者记录本次实际执行。 |
+### 2.4 表达式
 
-### 2.2 slots 的完整语义
+requires、branch condition 和 policy condition 使用受限表达式语言。表达式只能读取已声明引用，不得调用任意代码或产生副作用，并采用 true、false、unknown 三值逻辑。除非字段另有规定，unknown 按条件不满足处理。
 
-slots 不是“模型抽取到的所有信息”，而是 workflow 允许接受的输入契约。每个 slot 都要回答：它是什么类型、谁能写、是否必填、是否能修改、修改后从哪里重算。
+### 2.5 模板
+
+模板只能引用节点 inputs 中声明的数据，不得读取未声明状态，也不得调用函数或工具。
+
+### 2.6 版本
+
+Definition 使用 MAJOR.MINOR.PATCH 语义化版本。已启动的 Workflow Instance 必须固定到解析后的准确 Definition 版本。
+
+## 3. Workflow 顶层对象
+
+### 3.1 基本结构
 
 ~~~json
 {
-  "slots": {
+  "spec_version": "0.1",
+  "id": "flight_booking",
+  "version": "1.0.0",
+  "title": "预订机票",
+  "description": "查询航班、选择舱位、确认并创建订单",
+  "entry": "collect_trip",
+  "inputs": {},
+  "artifacts": {},
+  "nodes": {},
+  "dependencies": [],
+  "policies": []
+}
+~~~
+
+### 3.2 顶层字段
+
+| 字段 | 类型 | 必填 | 含义 |
+|---|---|---:|---|
+| spec_version | string | 是 | 本文规范的版本 |
+| id | identifier | 是 | Workflow 稳定 ID |
+| version | semver | 是 | Definition 版本 |
+| title | string | 否 | 面向维护者的名称 |
+| description | string | 否 | 流程用途说明 |
+| entry | node ID | 是 | 新实例入口节点 |
+| inputs | object | 是 | 输入声明 |
+| artifacts | object | 是 | 派生结果声明 |
+| nodes | object | 是 | 节点定义 |
+| dependencies | array | 否 | 对自动依赖图的显式补充或覆盖 |
+| policies | array | 否 | 业务、安全和风控规则 |
+
+未知顶层字段必须被拒绝，除非规范定义了明确的扩展命名空间。
+
+## 4. 数据声明
+
+### 4.1 Input
+
+Input 是从 Workflow 外部进入流程的数据，来源可以是用户、调用方或可信外部事件。
+
+~~~json
+{
+  "inputs": {
+    "departure_date": {
+      "type": "date",
+      "required": true,
+      "source": ["user"],
+      "mutable": "until_irreversible_effect",
+      "sensitive": false
+    },
     "cabin": {
       "type": "enum",
       "values": ["economy", "business", "first"],
       "required": true,
-      "owner": "user",
-      "mutable": true,
-      "change_policy": {
-        "restart_at": "search_flights",
-        "priority": 20,
-        "invalidates": ["flight_search", "selected_flight", "cabin_quote"]
-      }
+      "source": ["user"],
+      "mutable": "until_irreversible_effect"
     }
   }
 }
 ~~~
 
-字段含义：
+#### 4.1.1 Input 字段
 
-- slot 名称是稳定的程序字段名，不是问题文本。
-- type 决定解析后的值能否写入；自然语言“明天”必须先解析成案件时区下的绝对日期。
-- owner 决定写入权限。user slot 可以由用户更正，tool artifact 不能被模型伪造。
-- required 只表示流程门槛，不代表一开始就必须询问；引擎可以在真正需要它的节点前再询问。
-- mutable=false 时，用户后续说“改一下”必须进入澄清或人工处理，不能静默覆盖。
-- change_policy 决定已有值被修改后的回退入口和额外清理范围。
-- 用户本轮消息解析出的 slot_changes 是临时 patch，只有通过这些校验后才合并进动态 State。
+| 字段 | 必填 | 含义 |
+|---|---:|---|
+| type | 是 | 规范化后的数据类型 |
+| schema | 复杂类型时 | 类型结构 |
+| values | enum 时 | 允许值 |
+| required | 是 | Workflow 成功完成前是否必须存在 |
+| source | 是 | 允许写入来源：user、caller、event、system |
+| mutable | 是 | never、always、until_irreversible_effect |
+| default | 否 | 无外部值时的确定性默认值 |
+| sensitive | 否 | 是否属于敏感数据 |
+| retention | 否 | 建议保留范围：turn、instance、audit、none |
 
-## 3. artifacts：派生事实的完整规范
+required 不表示 Workflow 启动时必须已有该值。节点可以在真正使用之前收集它。
 
-artifact 是 workflow 执行产生的结果，不是用户原始输入。典型 artifact 包括航班搜索结果、报价、订单、退款资格和确认文案。静态定义只描述 artifact 的契约；真实值、来源和版本保存在动态 State.artifacts。
+#### 4.1.2 用户选择也是 Input
 
-### 3.1 artifact 定义
+用户从工具结果中做出的选择仍然是 Input，例如 inputs.selected_flight_id。但它依赖搜索结果。产生该选择的 ask 节点必须读取 artifacts.flight_search 并输出 inputs.selected_flight_id，因此搜索结果失效时，该选择也会失效。
+
+### 4.2 Artifact
+
+Artifact 是节点产生的派生事实。工具结果、计算结果、验证结果和确认结果都属于 Artifact。
 
 ~~~json
 {
   "artifacts": {
     "flight_search": {
-      "producer": "search_flights",
+      "type": "object",
+      "schema": "types/FlightSearchResult@1",
       "owner": "tool",
-      "value_schema": "FlightSearchResult",
-      "cache": {
-        "enabled": true,
-        "ttl_seconds": 60
-      },
-      "retention": "case",
+      "validity": {"ttl": "PT60S"},
       "sensitive": false
     },
-    "cabin_quote": {
-      "producer": "quote_flight",
-      "owner": "tool",
-      "value_schema": "CabinQuote",
-      "cache": {
-        "enabled": false
-      },
-      "retention": "case",
-      "sensitive": false
+    "identity_verified": {
+      "type": "boolean",
+      "owner": "system",
+      "validity": {"ttl": "PT10M"},
+      "sensitive": true
     }
   }
 }
 ~~~
 
-| 字段 | 必填 | 实际含义 |
+| 字段 | 必填 | 含义 |
 |---|---:|---|
-| artifact 名称 | 是 | 稳定的结果名称。名称不能同时被 slot 或另一个 producer 使用。 |
-| producer | 是 | 唯一产生该 artifact 的节点 ID。 |
-| owner | 是 | 通常为 tool 或 system。模型和用户不能直接写入 tool artifact。 |
-| value_schema | 是 | 结果结构的类型标识。工具返回的数据必须符合它。 |
-| cache.enabled | 否 | 是否允许复用历史结果。复用前必须检查依赖版本、TTL 和权限范围。 |
-| cache.ttl_seconds | 否 | 结果最多可复用多久；价格、库存等实时数据通常使用很短 TTL。 |
-| retention | 否 | 保存范围，例如 turn、case、audit 或 none。敏感值不能因为 cache 开启而长期保存。 |
-| sensitive | 否 | 是否需要加密、脱敏、最短保存和访问审计。 |
+| type | 是 | artifact 值类型 |
+| schema | 复杂类型时 | 值结构 |
+| owner | 是 | tool、system、workflow |
+| validity.ttl | 否 | 最长有效时间 |
+| sensitive | 否 | 是否敏感 |
+| retention | 否 | 建议保留范围 |
 
-### 3.2 artifact 的运行时状态
+Artifact 的 producer 由 node.outputs 推导，不在 artifact 中重复声明。默认每个 artifact 只有一个 producer。需要多来源合并时，应通过明确的 merge action 产生最终 artifact。
 
-工具成功后，State 中保存的不只是 value，还必须保存来源和依赖快照：
+### 4.3 Input 与 Artifact 的边界
+
+- 外部主体提供或选择的值是 Input；
+- Workflow 通过工具、计算或验证产生的值是 Artifact；
+- 用户不能直接写入 Artifact；
+- 工具不能绕过节点 output 合同修改 Input；
+- 同一个名称不能同时存在于两个命名空间。
+
+### 4.4 数据有效性
+
+| 状态 | 含义 |
+|---|---|
+| absent | 尚无值 |
+| pending | 正在产生 |
+| valid | 当前可使用 |
+| stale | 上游版本或 TTL 已变化，需要重算 |
+| invalid | 被业务或安全规则撤销 |
+| error | 最近一次产生失败 |
+
+只有 valid 数据可以满足节点 inputs 和 requires。
+
+## 5. 流程图声明
+
+### 5.1 Node 公共字段
+
+| 字段 | 含义 |
+|---|---|
+| type | 节点类型 |
+| inputs | 节点会读取的完整数据引用 |
+| outputs | 节点被允许写入的数据引用 |
+| requires | 执行前必须满足的确定性条件 |
+| timeout | 单次节点执行时限 |
+| retry | 重试规则 |
+| metadata | 不影响运行语义的扩展信息 |
+
+#### 5.1.1 node.inputs
+
+node.inputs 是完整读取声明。工具参数模板、requires、branch condition、response 模板和 output 计算引用的数据都必须出现在 inputs 中。缺少声明属于 Definition 错误，Engine 不得偷偷读取未声明数据。
+
+#### 5.1.2 node.outputs
+
+node.outputs 是写入白名单：
+
+- action 通常写 artifact；
+- ask 通常写 user-sourced input；
+- wait 可以写 event-sourced input 或 artifact；
+- call 写映射后的子 Workflow 结果；
+- branch、respond 和 end 通常没有 output。
+
+工具返回但未声明为 output 的字段不得写入 Workflow State。
+
+#### 5.1.3 inputs 与 requires
+
+inputs 回答“节点读取什么”，用于依赖图和数据血缘；requires 回答“什么条件下允许执行”，用于业务门槛。requires 中引用的数据也必须包含在 inputs 中。
+
+### 5.2 ask
+
+ask 暂停流程并等待外部输入。
 
 ~~~json
 {
-  "artifacts": {
-    "flight_search": {
-      "status": "valid",
-      "value": {
-        "flights": [{"id": "CA123", "price": 2100}]
-      },
-      "source": {
-        "kind": "tool",
-        "name": "flight.search",
-        "call_id": "call_72"
-      },
-      "revision": 3,
-      "depends_on": {
-        "origin": 1,
-        "destination": 1,
-        "departure_date": 2,
-        "cabin": 1
-      },
-      "created_at": "2026-09-19T10:00:00+08:00",
-      "expires_at": "2026-09-19T10:01:00+08:00"
-    }
+  "type": "ask",
+  "inputs": ["artifacts.flight_search"],
+  "outputs": ["inputs.selected_flight_id"],
+  "request": {
+    "kind": "selection",
+    "prompt": "请选择航班",
+    "options_from": "artifacts.flight_search.flights",
+    "accepts": ["answer", "modify", "cancel"]
+  },
+  "on": {
+    "answer": "quote_cabin",
+    "cancel": "cancelled"
   }
 }
 ~~~
 
-| 运行时字段 | 实际含义 |
-|---|---|
-| status | valid、stale、invalid、error 或 pending。invalid 的结果不能进入工具参数、分支或回复模板。 |
-| value | 工具返回的结构化业务数据，不应保存模型猜测的结果。 |
-| source | 产生结果的工具、调用 ID 或系统事件，用于审计和追责。 |
-| revision | 该 artifact 的版本，每次重新产生都递增。 |
-| depends_on | 产生它时各输入事实的 revision 快照。它是运行时血缘，不是静态字段值。 |
-| created_at / expires_at | 结果的时间边界，用于 TTL、价格和库存校验。 |
+输入修改事件是 Workflow Instance 的标准事件，即使不属于当前问题的普通 answer，也必须按第 14 章处理。
 
-### 3.3 artifact 生命周期
+### 5.3 action
 
-一个 artifact 按以下状态流转：
+action 调用已注册的确定性工具。
 
-~~~text
-absent → pending → valid
-                   ├→ stale（上游版本改变或超过 TTL）
-                   ├→ invalid（业务策略主动撤销）
-                   └→ error（工具失败）
-~~~
-
-- action 开始前可以创建 pending，但 pending 不能满足后续 requires。
-- 工具成功且版本仍匹配时变为 valid。
-- 上游 slot 或 artifact 版本改变时变为 stale，并从可用上下文中移除。
-- policies 要求撤销时变为 invalid；invalid 需要重新执行指定验证或计算节点。
-- 工具失败时记录 error。是否重试由工具层或 transitions 决定，不能由模型自行重试写操作。
-
-### 3.4 artifact 和 slot 的边界
-
-不要让同一个名称既表示用户输入又表示工具输出：
-
-~~~text
-正确：
-departure_date（user slot）
-flight_search（tool artifact）
-selected_flight_id（user slot，depends_on flight_search）
-cabin_quote（tool artifact）
-
-错误：
-flight_date 同时作为用户填写日期和工具返回日期
-~~~
-
-用户选择的 selected_flight_id 虽然是 user slot，但它依赖 flight_search。只要 flight_search 失效，selected_flight_id 也必须清除，因为它已经不再属于当前可选集合。
-
-### 3.5 依赖、缓存和安全边界
-
-inputs/outputs 编译出的依赖图决定“结果是否需要重算”；运行时 depends_on 决定某个缓存结果是否仍然对应当前输入版本；policies 决定是否因业务或安全原因额外撤销结果。这三者都必须检查，不能只看缓存是否存在。
-
-工具拥有的订单、支付状态、退款资格、身份认证等 artifact 不能由 Agent 或用户输入覆盖。用户只能修改 owner=user 且 mutable=true 的 slot；修改后由引擎重新产生可信 artifact。
-
-## 4. 通用节点字段
-
-每个节点必须有 `type`。节点 ID 只用于图内跳转，不是数据库 ID，也不应暴露给用户。
-
-| 字段 | 适用节点 | 实际含义 |
-|---|---|---|
-| `type` | 所有节点 | 节点行为类型：`ask`、`branch`、`action`、`respond`、`wait`、`end`。 |
-| `max_visits` | 可循环节点 | 同一案件最多进入该节点多少次。用于限制验证码重试、查单补充信息等循环。 |
-| `on_limit` | 设置 `max_visits` 时 | 达到访问次数上限后跳转的节点，通常是 `escalate`。设置 `max_visits` 却没有它属于 Schema 错误。 |
-
-`max_visits` 统计的是进入节点的次数，不是工具重试次数。工具的网络重试应由工具层处理；业务失败状态应通过 `transitions` 处理。
-
-## 5. 节点类型
-
-### 5.1 `ask`：等待用户输入
-
-```json
+~~~json
 {
-  "type": "ask",
-  "collect": ["charge_date", "amount"],
-  "sensitive_collect": [],
-  "prompt": "请提供扣款日期和金额。",
-  "next": "find_order"
+  "type": "action",
+  "inputs": [
+    "inputs.origin",
+    "inputs.destination",
+    "inputs.departure_date",
+    "inputs.cabin"
+  ],
+  "outputs": ["artifacts.flight_search"],
+  "tool": "flight.search@2",
+  "arguments": {
+    "origin": "{{ inputs.origin }}",
+    "destination": "{{ inputs.destination }}",
+    "date": "{{ inputs.departure_date }}",
+    "cabin": "{{ inputs.cabin }}"
+  },
+  "result": {"value": "artifacts.flight_search"},
+  "statuses": {
+    "success": "select_flight",
+    "no_result": "report_no_result",
+    "business_error": "report_search_failure",
+    "technical_error": "escalate"
+  },
+  "effect": {"kind": "none"}
 }
-```
+~~~
 
-| 字段 | 类型 | 实际含义 |
-|---|---|---|
-| `collect` | string[] | Agent 本轮只能从用户回复中提取的字段白名单。提取结果要经过类型和来源校验后才能写入 `facts`。 |
-| `sensitive_collect` | string[] | `collect` 中需要特殊处理的字段，例如 OTP。它表示字段敏感，不表示可以绕过工具验证。敏感值应在工具调用后消费、脱敏或从持久化存储中删除。 |
-| `prompt` | string | 给 Agent 的提问内容。Agent 可以调整语气，但问题必须围绕这些字段。 |
-| `next` | node ID | 用户回答被接受后进入的节点。它不表示工具成功；只是表示本次提问结束。 |
+工具所有可能状态必须被 statuses 覆盖。未知状态必须安全停止。
 
-`ask` 到达后，引擎将案件标为 `waiting_for_user` 并停止。下一条消息恢复案件，Harness 依据当前节点的 `collect` 提取字段。
+### 5.4 branch
 
-### 5.2 `branch`：确定性分支
+branch 按顺序计算条件，第一个 true 分支获胜。default 必填，condition 为 unknown 时不命中。
 
-```json
+~~~json
 {
   "type": "branch",
+  "inputs": ["artifacts.order"],
   "cases": [
-    {"when": "order.channel == 'apple'", "next": "guide_apple"}
+    {
+      "when": "artifacts.order.channel == 'ios'",
+      "next": "guide_apple_refund"
+    }
   ],
-  "default": "guide_other_store"
+  "default": "evaluate_refund"
 }
-```
+~~~
 
-| 字段 | 类型 | 实际含义 |
-|---|---|---|
-| `cases` | object[] | 按数组顺序检查的条件分支。第一个为真的条件获胜。 |
-| `cases[].when` | restricted expression | 只读 `facts` 的受限表达式，支持 dotted path、字符串/数字/布尔/null 字面量、`==`、`!=`、`and`、`or`。不是 Python 代码，不能调用函数。 |
-| `cases[].next` | node ID | 条件为真时的目标节点。 |
-| `default` | node ID | 没有条件为真时的目标节点，必须明确配置，不能让模型猜。 |
+### 5.5 respond
 
-条件只能使用已经写入 `facts` 的值。工具没有返回 `order.channel` 时，`order.channel == 'apple'` 为假，流程会继续检查其他 case 或 `default`。
+respond 产生结构化响应，并可继续迁移。成功、已退款、已出票等事实性表达必须来自 valid artifact。
 
-### 5.3 `action`：受控工具操作
+### 5.6 wait
 
-```json
+wait 等待可信外部事件。事件必须通过类型、来源和 correlation key 校验，并声明 received 与 timeout 路径。
+
+### 5.7 call
+
+call 调用另一个确定性 Workflow。
+
+~~~json
 {
-  "type": "action",
-  "tool": "submit_refund",
-  "args": {"order_id": "{{ order.id }}"},
-  "requires": [
-    "target_account_verified",
-    "order.id",
-    "refund_eligibility == 'eligible'",
-    "confirm_refund"
-  ],
-  "on_guard_failure": "escalate",
-  "result_statuses": ["submitted", "already_submitted", "error"],
-  "transitions": {
-    "submitted": "report_submitted",
-    "already_submitted": "report_already_submitted",
-    "error": "escalate"
+  "type": "call",
+  "inputs": ["inputs.phone_number"],
+  "outputs": ["artifacts.identity_verified"],
+  "workflow": {
+    "id": "identity_verification",
+    "version": "2.1.0"
   },
-  "save_result_as": "refund_submission",
-  "consume_facts": [],
-  "idempotency_key": "{{ case_id }}:refund:{{ order.id }}"
-}
-```
-
-| 字段 | 类型 | 实际含义 |
-|---|---|---|
-| `tool` | string | 工具注册表中的稳定名称。loader 要求它已注册；Agent 不能临时发明工具名。 |
-| `args` | object | 调用工具时使用的参数模板。完整的 `{{ path }}` 替换为该 fact 的原值；字符串中的内嵌模板替换为文本。缺失值不会被模型补造，工具参数校验应拒绝不合法输入。 |
-| `requires` | string[] | 调用前的守卫。单独的 dotted path 要求值为真；包含比较或布尔运算时按受限表达式求值。任何一项不满足，都不调用工具。 |
-| `on_guard_failure` | node ID | 守卫失败的确定性去向，例如先验证身份或补充信息。它不是工具报错路径。当前规范要求每个 `action` 都配置它。 |
-| `result_statuses` | string[] | 该工具在此节点允许返回的完整状态枚举。未知状态会安全停止，不能让模型选择下一步。 |
-| `transitions` | object | `状态 → 节点 ID` 映射。必须为每个 `result_statuses` 配置一个目标。 |
-| `save_result_as` | string | 将结构化工具结果保存到 `facts` 的名称。引擎保存状态、数据和错误，并给事实标记工具来源。 |
-| `consume_facts` | string[] | 工具调用完成后删除的临时事实路径，适合 `otp_code` 等敏感输入。 |
-| `idempotency_key` | string | 写操作的幂等键模板。退款、取消等操作必须让相同案件和目标重复执行时返回原结果，而不是产生第二次业务操作。 |
-
-`action` 的执行顺序固定为：检查 `requires` → 渲染 `args` 和幂等键 → 调用已注册工具 → 消费临时事实 → 校验返回状态 → 保存工具结果 → 按 `transitions` 跳转。
-
-`on_guard_failure` 与 `transitions.error` 的区别：前者表示“还没有资格调用工具”，后者表示“工具已经调用，但业务或服务返回失败”。
-
-### 5.4 `respond`：向用户说明结果
-
-```json
-{
-  "type": "respond",
-  "template": "退款申请已提交，状态为 {{ refund_submission.status }}。",
-  "next": "done"
-}
-```
-
-| 字段 | 类型 | 实际含义 |
-|---|---|---|
-| `template` | string | 面向用户的回复模板。模板只能引用 facts；“已提交”“已取消”等成功表述必须对应工具真实结果。 |
-| `next` | node ID | 可选。存在时先输出回复，再继续运行；省略时该回复结束本轮并将案件标为完成。 |
-
-### 5.5 `wait`：等待外部事件
-
-```json
-{"type": "wait", "event": "human_case_updated", "next": "report_human_result"}
-```
-
-| 字段 | 类型 | 实际含义 |
-|---|---|---|
-| `event` | string | 外部恢复事件的类型，例如人工审核完成。 |
-| `next` | node ID | 事件到达后恢复到的节点。当前 CLI 原型只持久化等待状态；生产实现需要事件入口。 |
-
-### 5.6 `end`：流程完成
-
-`end` 没有业务字段。引擎到达它时把案件状态设置为 `completed`。它只表示 workflow 结束，不表示退款一定成功；成功与否必须由前面的结果节点说明。
-
-## 6. 用户修改和事实失效
-
-目标规范使用 slots 中的 change_policy、节点 inputs/outputs 和 policies 计算失效范围。当前原型的 mutable_inputs 是兼容写法，表示相同的用户修改入口，但要求 workflow 作者手工维护 invalidates 清单。
-
-用户在确认前修改出发日期、金额、渠道或账号，是正常流程行为。不能直接覆盖一个字段后继续，因为搜索结果、报价和确认可能都是旧输入产生的。
-
-```json
-"mutable_inputs": {
-  "travel_date": {
-    "type": "string",
-    "on_change": "search_flights",
-    "priority": 10,
-    "invalidates": [
-      "flight_search",
-      "selected_flight",
-      "cabin_quote",
-      "booking_confirmation"
-    ]
+  "map_inputs": {
+    "phone_number": "inputs.phone_number"
+  },
+  "map_outputs": {
+    "verified": "artifacts.identity_verified"
+  },
+  "on": {
+    "completed": "find_order",
+    "cancelled": "cancelled",
+    "failed": "escalate"
   }
 }
-```
+~~~
 
-| 字段 | 实际含义 |
+发布时必须把子 Workflow 引用固定到准确版本。父 Workflow 只能读取 map_outputs 声明的结果。
+
+### 5.8 end
+
+end 终止实例并声明 outcome。Workflow outcome 不等于某项业务操作天然成功，业务成功必须由可信 artifact 支撑。
+
+### 5.9 Transition
+
+Transition 是节点定义的一部分，常见形式为 next、on、statuses、cases 和 default。每个目标必须引用当前 Definition 中存在的 node。
+
+## 6. Dependencies
+
+### 6.1 自动依赖图
+
+编译器根据每个节点的 inputs 和 outputs 生成依赖边。默认每个 output 依赖该节点的全部 inputs。
+
+~~~text
+inputs.origin ─────────┐
+inputs.destination ────┼→ artifacts.flight_search
+inputs.departure_date ─┘
+~~~
+
+### 6.2 显式 dependencies
+
+显式 dependencies 用于补充或收窄自动推导结果：
+
+~~~json
+{
+  "dependencies": [
+    {
+      "target": "artifacts.booking_confirmation",
+      "sources": [
+        "inputs.departure_date",
+        "inputs.selected_flight_id",
+        "artifacts.cabin_quote"
+      ],
+      "mode": "replace"
+    },
+    {
+      "target": "artifacts.refund_eligibility",
+      "sources": ["artifacts.risk_assessment"],
+      "mode": "extend"
+    }
+  ]
+}
+~~~
+
+| 字段 | 含义 |
 |---|---|
-| key | 用户输入字段名，必须被某个 `ask.collect` 收集。 |
-| `type` | 该字段允许的数据类型。Harness 在写入前检查，不能让模型把字符串“eligible”写进工具拥有的资格字段。 |
-| `enum` | 可选的允许值列表，例如账号关系只能是 `current` 或 `other`。 |
-| `on_change` | 该输入被修改后重新计算的入口节点。它应指向最早受影响的步骤。 |
-| `priority` | 同一条消息修改多个字段时的重算优先级；数值越小越早。 |
-| `invalidates` | 修改后必须删除的派生事实、来源和版本。旧搜索结果、旧报价和旧确认都应列出。 |
+| target | 被影响的数据 |
+| sources | target 的直接上游 |
+| mode | extend 追加；replace 替换自动依赖 |
+| when | 可选的条件依赖表达式 |
 
-### 6.1 字段修改的完整示例
+replace 可能造成漏失效，SHOULD 仅用于 output 确实只依赖部分 node.inputs 的情况。
 
-下面的声明表示：`travel_date` 是用户可以再次修改的输入；如果它已经有值且用户提供了新值，工作流必须从 `search_flights` 重新查询，并清除基于旧日期产生的结果。
+### 6.3 直接依赖与传递依赖
 
-```json
+Definition 只声明直接依赖。Engine 必须计算传递闭包。F → B → A 中，F 改变后 B 和 A 都失效，作者不需要维护 invalidates: [B, A]。
+
+### 6.4 条件依赖
+
+条件依赖只在 when 为 true 时建立。Engine 在产生 target 时必须记录本次实际启用的依赖边。
+
+### 6.5 循环
+
+纯数据依赖图必须是有向无环图。循环交互使用控制流循环和新的 revision，不得建立 artifact 自依赖。
+
+## 7. Policies
+
+### 7.1 使用边界
+
+Policy 只表达普通数据血缘无法完整推导的业务、安全或权限规则。例如手机号变化后强制重新发送 OTP，或已经出票后修改日期必须进入改签流程。普通的“输入变化导致依赖结果重算”不得重复写成 policy。
+
+### 7.2 Policy 结构
+
+~~~json
 {
-  "mutable_inputs": {
-    "travel_date": {
-      "type": "string",
-      "on_change": "search_flights",
-      "priority": 10,
-      "invalidates": [
-        "flight_search",
-        "selected_flight",
-        "cabin_quote",
-        "booking_confirmation"
-      ]
+  "policies": [
+    {
+      "id": "phone_changed_reverify",
+      "priority": 100,
+      "trigger": {
+        "type": "input.changed",
+        "ref": "inputs.phone_number"
+      },
+      "when": "artifacts.identity_verified == true",
+      "effects": [
+        {
+          "type": "invalidate",
+          "targets": [
+            "artifacts.otp_verified",
+            "artifacts.identity_verified"
+          ]
+        },
+        {
+          "type": "redirect",
+          "node": "send_otp"
+        }
+      ],
+      "reason": "identity_scope_changed"
     }
-  }
+  ]
 }
-```
+~~~
 
-字段的实际关系是：
+标准 trigger 包括 input.changed、artifact.changed、artifact.expired、external.event、effect.committed 和 permission.changed。
 
-```text
-travel_date
-    ↓
-flight_search
-    ↓
-selected_flight
-    ↓
-cabin_quote
-    ↓
-booking_confirmation
-```
+标准 effect：
 
-第一次收集日期时，Harness 只写入用户事实并继续向前执行。如果案件已经查询并选定航班，用户随后说“改成 2026-09-21”，Harness 应产生结构化修改：
+| effect | 含义 |
+|---|---|
+| invalidate | 将目标标为 invalid |
+| require_revalidation | 要求指定验证结果重新产生 |
+| block | 阻止当前操作并返回原因 |
+| redirect | 指定必须进入的处理节点 |
 
-```json
+Policy 不得直接产生业务成功结果，也不得把 invalid 数据改回 valid。
+
+### 7.3 优先级与冲突
+
+同一事件触发多个 policy 时，按 priority 从高到低计算；invalidate 和 require_revalidation 取并集；block 优先于 redirect；相同最高优先级的不同 redirect 属于冲突，Engine 必须安全停止。
+
+---
+
+# 第二部分：静态语义
+
+## 8. 名称与引用解析
+
+Loader 必须检查：
+
+- entry 存在；
+- 所有 transition 目标存在；
+- 所有 input 和 artifact 引用存在；
+- node.outputs 的目标已声明；
+- call 的子 Workflow 和映射字段存在；
+- policy trigger 和 effect 目标存在；
+- context 引用属于规范允许的只读字段。
+
+## 9. 类型检查
+
+编译器必须验证：
+
+- 默认值符合 input 类型；
+- enum 值在允许集合中；
+- 工具参数与工具合同一致；
+- 工具结果与 artifact schema 一致；
+- 表达式运算符适用于对应类型；
+- call 输入输出映射类型兼容；
+- end result 类型符合 Workflow 对外合同。
+
+## 10. 图编译
+
+### 10.1 控制流图
+
+控制流图由 entry、next、on、statuses、cases 和 default 构建。
+
+编译器必须检查入口可达性、非终止节点的后继、不可达节点、没有退出条件的循环，以及等待节点的恢复或超时路径。
+
+### 10.2 数据依赖图
+
+数据依赖图由 node.inputs、node.outputs 和显式 dependencies 构建。编译产物至少包括：
+
+~~~text
+producer_by_data
+consumers_by_data
+upstream_dependencies
+reverse_dependencies
+~~~
+
+### 10.3 Producer 规则
+
+每个 artifact 默认只有一个 producer。每个可由 ask 写入的 input 可以有一个收集节点，并允许外部修改事件更新。
+
+多个节点竞争写同一个 artifact 属于 Definition 错误，除非通过规范化 merge 节点形成单一 producer。
+
+## 11. Definition 合法性
+
+发布前必须满足：
+
+- 所有引用可解析；
+- 所有表达式可类型检查；
+- 数据依赖图无环；
+- artifact producer 唯一；
+- 节点只能写 outputs 白名单；
+- action statuses 完整；
+- branch 有 default；
+- retry 不会重复不可幂等副作用；
+- irreversible action 声明输入修改后的处理方式；
+- policy 不产生循环 redirect；
+- call 图不存在不受控递归。
+
+---
+
+# 第三部分：规范性运行语义
+
+## 12. 抽象运行时模型
+
+本章只定义解释 Definition 所需的抽象对象，不规定持久化 JSON 或数据库结构。
+
+### 12.1 Workflow Instance
+
+每个实例至少具有：
+
+~~~text
+workflow_id
+workflow_version
+instance_id
+execution_status
+active_nodes
+input_values
+artifact_values
+committed_effects
+event_log
+~~~
+
+### 12.2 Value Revision
+
+每个 input 和 artifact 值都有单调递增的 revision。新值、重新确认和重新验证都会产生新 revision。
+
+### 12.3 Runtime depends_on
+
+节点成功产生 output 时，Engine 必须记录本次实际使用的上游 revision：
+
+~~~json
 {
-  "travel_date": "2026-09-21"
-}
-```
-
-引擎随后会：
-
-1. 校验字段类型，并确认它是声明过的 `mutable_input`。
-2. 更新日期，增加该事实的 revision，并记录来源为 `user`。
-3. 删除 `invalidates` 列出的事实、来源和 revision。
-4. 把 `current_node` 设置为 `search_flights`，清除等待用户状态。
-5. 重新查询航班；之后用户需要重新选择航班、舱位和报价，并重新确认。
-
-修改前的案件事实可能是：
-
-```json
-{
-  "travel_date": "2026-09-20",
-  "flight_search": {"date": "2026-09-20", "flights": ["F1", "F2"]},
-  "selected_flight": "F1",
-  "cabin_quote": {"cabin": "business", "price": 2500},
-  "booking_confirmation": true
-}
-```
-
-修改日期后，旧的搜索结果、选中航班、报价和确认事实都不能继续使用；日期以外仍然有效的用户输入（例如出发地、到达地和舱位偏好）可以保留并作为新查询的参数。
-
-`priority` 只在一条消息修改多个字段时使用。引擎选择数值最小的 `on_change` 入口，从最早受影响的步骤重新执行。`invalidates` 是 workflow 作者明确声明的清理清单；如果某个派生事实可能依赖该输入，就必须列入其中。
-
-### 6.2 目标规范：节点输入输出和依赖图
-
-正式版本应在节点上声明 `inputs` 和 `outputs`：
-
-```json
-{
-  "id": "search_flights",
-  "type": "action",
-  "tool": "flight.search",
-  "inputs": ["origin", "destination", "departure_date", "cabin"],
-  "outputs": ["flight_search"]
-}
-```
-
-引擎编译 workflow 时，以 `inputs`/`outputs` 构建依赖图。运行工具后，系统还要在 artifact 上记录实际使用的事实版本：
-
-```json
-{
-  "name": "flight_search",
+  "artifact": "artifacts.flight_search",
+  "revision": 3,
   "depends_on": {
-    "origin": 1,
-    "destination": 1,
-    "departure_date": 3,
-    "cabin": 2
+    "inputs.origin": 1,
+    "inputs.destination": 1,
+    "inputs.departure_date": 4
   }
 }
-```
+~~~
 
-用户修改 `departure_date` 后，引擎沿反向依赖图清除 `flight_search` 以及依赖它的 `selected_flight`、`cabin_quote` 和 `booking_confirmation`，再从最早受影响的节点继续执行。`depends_on` 是运行时血缘记录；`inputs`/`outputs` 是 workflow 的静态声明，两者不是重复的状态对象。
+Definition 中的 dependencies 是静态可能依赖；Runtime depends_on 是本次实际血缘。
 
-### 6.3 业务和安全失效规则
+## 13. 节点执行
 
-依赖图解决“结果计算是否仍然正确”，不能表达所有“是否仍然允许信任”的业务规则。定义中可用 `policies` 补充这种影响：
+### 13.1 基本循环
 
-```json
+~~~text
+选择可执行节点
+→ 检查 input 状态
+→ 计算 requires
+→ 执行节点
+→ 校验结果
+→ 原子提交 outputs、revision、血缘和事件
+→ 选择 transition
+→ 继续，直到 ask、wait、end 或安全停止
+~~~
+
+### 13.2 输入检查
+
+节点的所有 inputs 必须为 valid。存在 absent、pending、stale、invalid 或 error 时，节点不可执行。
+
+### 13.3 requires
+
+requires 为 false 或 unknown 时，节点不得执行。Definition 必须通过显式迁移或上游节点解决缺失门槛，不允许 Engine 猜测。
+
+### 13.4 原子提交
+
+节点结果、output revisions、depends_on、transition 和审计事件必须作为一个逻辑事务提交。失败时不得留下部分 valid output。
+
+### 13.5 暂停与恢复
+
+ask 和 wait 产生等待令牌。恢复事件必须匹配实例、节点、事件类型和 correlation 信息。过期等待令牌不得恢复已被重新执行替代的节点。
+
+## 14. 输入修改与重新计算
+
+### 14.1 修改是标准事件
+
+输入修改不是“当前 ask 的异常答案”，而是 Workflow Instance 可在任何等待点接收的标准事件：
+
+~~~json
 {
-  "policies": {
-    "account_relation": {
-      "on_change": "verify_identity",
-      "invalidates": ["identity_verified", "account_binding", "refund_eligibility"],
-      "reason": "account_scope_changed"
+  "type": "input.change",
+  "changes": {
+    "inputs.departure_date": "2026-09-20"
+  },
+  "expected_revisions": {
+    "inputs.departure_date": 4
+  }
+}
+~~~
+
+expected_revisions 用于避免并发覆盖。
+
+### 14.2 修改事务
+
+Engine 必须按以下顺序处理：
+
+1. 验证 input 存在；
+2. 验证事件来源属于 input.source；
+3. 验证 mutable 规则；
+4. 规范化并校验新值；
+5. 原子比较 expected revision；
+6. 写入新值并增加 revision；
+7. 计算依赖失效；
+8. 执行匹配 policies；
+9. 计算重新执行计划；
+10. 撤销过期等待令牌并恢复执行。
+
+同一事件中的多个 changes 必须作为一个原子修改集合处理，不能逐个回退流程。
+
+### 14.3 失效传播
+
+对于每个改变的 input：
+
+1. 从 reverse_dependencies 找到直接消费者；
+2. 沿依赖图传播到所有传递下游；
+3. 普通派生结果标记为 stale；
+4. policy 撤销的安全或业务结果标记为 invalid；
+5. 依赖旧数据的确认、选择和授权一并失效。
+
+确认必须依赖它所确认的全部业务数据。日期、航班或价格任一变化，旧确认都不能复用。
+
+### 14.4 重新执行边界
+
+Engine 从失效子图中选择最小重算前沿：
+
+- output 已失效；
+- node 的上游 inputs 当前 valid；
+- 该 node 之前没有另一个必须先重算的失效 producer。
+
+前沿节点按数据依赖拓扑顺序执行。需要用户重新选择时，执行会自然停在对应 ask。
+
+这不是把 current node 简单设置回某个固定节点。重新入口由当前失效子图和可用输入共同计算。
+
+### 14.5 机票修改示例
+
+~~~text
+inputs.departure_date
+        ↓
+artifacts.flight_search
+        ↓
+inputs.selected_flight_id
+        ↓
+artifacts.cabin_quote
+        ↓
+inputs.booking_confirmed
+~~~
+
+确认时用户修改日期：
+
+~~~text
+departure_date revision 4 → 5
+→ flight_search stale
+→ selected_flight_id stale
+→ cabin_quote stale
+→ booking_confirmed invalid
+→ 重算前沿为 search_flights
+→ 搜索完成后停在 select_flight
+→ 用户重新选择、报价和确认
+~~~
+
+origin、destination、cabin 等没有被影响的 valid input 保留。
+
+### 14.6 不可逆副作用后的修改
+
+如果修改会影响已提交的 irreversible effect，Engine 不得删除历史结果或假装回退。action 必须声明处理方式：
+
+~~~json
+{
+  "effect": {
+    "kind": "irreversible",
+    "idempotency_key": "{{ context.workflow_instance_id }}:create_booking",
+    "on_input_change": {
+      "mode": "redirect",
+      "node": "start_change_booking"
     }
   }
 }
-```
+~~~
 
-最终失效集合是“依赖图传播结果”和“策略规则结果”的并集。策略规则不能让用户直接覆盖工具拥有的事实；它只决定哪些事实必须撤销以及从哪里重新验证。
+| mode | 含义 |
+|---|---|
+| reject | 拒绝修改并返回稳定原因 |
+| redirect | 进入改签、撤销或补偿节点 |
+| compensate | 先执行声明的补偿 action |
 
-### 6.4 ask 的修改路由
+已提交副作用及其结果是历史事实，不得因为上游输入改变而被删除或改写。Engine 应保留该 effect 和结果的原始血缘，再执行 reject、redirect 或 compensate。
 
-`ask` 不是只能接受“是/否”的节点。目标规范允许声明当前问题可以接受的意图：
+已经进入终止状态的 Workflow Instance 不再接收 input.change。终止后出现的新修改诉求应由调用方启动新的修改、撤销或补偿 Workflow；该调度方式不属于本文范围。
 
-```json
+## 15. 错误、副作用与恢复
+
+### 15.1 错误分类
+
+~~~text
+validation_error
+guard_failed
+business_error
+transport_error
+timeout
+contract_error
+policy_conflict
+~~~
+
+只有 Definition 明确列出的错误才可自动迁移或重试。
+
+### 15.2 Retry
+
+自动 retry 只适用于声明为可重试的错误。不可幂等写操作不得自动重试。
+
+### 15.3 Effect
+
+action 必须声明 none、reversible 或 irreversible。reversible 或 irreversible action 必须声明 idempotency key。reversible action SHOULD 声明 compensation。
+
+### 15.4 恢复
+
+实例恢复时必须根据已提交事件、幂等键和等待令牌继续。Engine 不得因为进程重启重复执行已提交副作用。
+
+## 16. Policy 执行
+
+Policy 在匹配 trigger 的事件事务中执行：
+
+~~~text
+接收事件
+→ 计算静态依赖失效
+→ 匹配 policy trigger
+→ 计算 when
+→ 合并 effects
+→ 检查冲突
+→ 原子提交失效、阻断或 redirect
+~~~
+
+依赖失效和 policy effect 不能分两次提交，否则中间状态可能错误地执行节点。
+
+---
+
+# 第四部分：一致性与示例
+
+## 17. 实现一致性要求
+
+### 17.1 Definition Validator
+
+兼容实现必须提供 JSON 结构校验、引用解析、类型检查、控制流检查、数据依赖检查和 policy 冲突检查。
+
+### 17.2 Workflow Compiler
+
+兼容实现必须固定子 Workflow 版本，生成控制流图、数据依赖图、反向依赖索引和 producer/consumer 索引，并输出可审计的编译诊断。
+
+### 17.3 Workflow Engine
+
+兼容实现必须支持确定性节点执行、revision、运行时血缘、原子 input change、级联失效、最小重算前沿、policy 执行、幂等副作用和崩溃恢复。
+
+### 17.4 Tool Adapter
+
+兼容实现必须支持输入输出合同校验、稳定状态枚举、timeout、错误分类、idempotency key 传递、correlation 和审计信息。
+
+## 18. 完整示例
+
+### 18.1 订机票核心 Definition
+
+以下示例重点展示数据依赖、确认和修改后的重算路径：
+
+~~~json
 {
-  "type": "ask",
-  "collect": ["booking_confirmation"],
-  "allowed_intents": ["confirm", "cancel", "modify"],
-  "intent_routes": {
-    "confirm": "create_booking",
-    "cancel": "end",
-    "modify": "apply_correction"
+  "spec_version": "0.1",
+  "id": "flight_booking",
+  "version": "1.0.0",
+  "entry": "collect_trip",
+  "inputs": {
+    "origin": {
+      "type": "string",
+      "required": true,
+      "source": ["user"],
+      "mutable": "until_irreversible_effect"
+    },
+    "destination": {
+      "type": "string",
+      "required": true,
+      "source": ["user"],
+      "mutable": "until_irreversible_effect"
+    },
+    "departure_date": {
+      "type": "date",
+      "required": true,
+      "source": ["user"],
+      "mutable": "until_irreversible_effect"
+    },
+    "cabin": {
+      "type": "enum",
+      "values": ["economy", "business", "first"],
+      "required": true,
+      "source": ["user"],
+      "mutable": "until_irreversible_effect"
+    },
+    "selected_flight_id": {
+      "type": "string",
+      "required": true,
+      "source": ["user"],
+      "mutable": "until_irreversible_effect"
+    },
+    "booking_confirmed": {
+      "type": "boolean",
+      "required": true,
+      "source": ["user"],
+      "mutable": "until_irreversible_effect"
+    }
+  },
+  "artifacts": {
+    "flight_search": {
+      "type": "object",
+      "schema": "types/FlightSearchResult@1",
+      "owner": "tool",
+      "validity": {"ttl": "PT60S"}
+    },
+    "cabin_quote": {
+      "type": "object",
+      "schema": "types/CabinQuote@1",
+      "owner": "tool",
+      "validity": {"ttl": "PT60S"}
+    },
+    "booking": {
+      "type": "object",
+      "schema": "types/Booking@1",
+      "owner": "tool"
+    }
+  },
+  "nodes": {
+    "collect_trip": {
+      "type": "ask",
+      "outputs": [
+        "inputs.origin",
+        "inputs.destination",
+        "inputs.departure_date",
+        "inputs.cabin"
+      ],
+      "request": {
+        "kind": "form",
+        "prompt": "请提供出发地、目的地、日期和舱位",
+        "accepts": ["answer", "cancel"]
+      },
+      "on": {
+        "answer": "search_flights",
+        "cancel": "cancelled"
+      }
+    },
+    "search_flights": {
+      "type": "action",
+      "inputs": [
+        "inputs.origin",
+        "inputs.destination",
+        "inputs.departure_date",
+        "inputs.cabin"
+      ],
+      "outputs": ["artifacts.flight_search"],
+      "tool": "flight.search@2",
+      "arguments": {
+        "origin": "{{ inputs.origin }}",
+        "destination": "{{ inputs.destination }}",
+        "date": "{{ inputs.departure_date }}",
+        "cabin": "{{ inputs.cabin }}"
+      },
+      "result": {"value": "artifacts.flight_search"},
+      "statuses": {
+        "success": "select_flight",
+        "no_result": "no_result",
+        "technical_error": "failed"
+      },
+      "effect": {"kind": "none"}
+    },
+    "select_flight": {
+      "type": "ask",
+      "inputs": ["artifacts.flight_search"],
+      "outputs": ["inputs.selected_flight_id"],
+      "request": {
+        "kind": "selection",
+        "prompt": "请选择航班",
+        "options_from": "artifacts.flight_search.flights",
+        "accepts": ["answer", "modify", "cancel"]
+      },
+      "on": {
+        "answer": "quote_cabin",
+        "cancel": "cancelled"
+      }
+    },
+    "quote_cabin": {
+      "type": "action",
+      "inputs": [
+        "inputs.selected_flight_id",
+        "inputs.cabin"
+      ],
+      "outputs": ["artifacts.cabin_quote"],
+      "tool": "flight.quote@1",
+      "arguments": {
+        "flight_id": "{{ inputs.selected_flight_id }}",
+        "cabin": "{{ inputs.cabin }}"
+      },
+      "result": {"value": "artifacts.cabin_quote"},
+      "statuses": {
+        "success": "confirm_booking",
+        "sold_out": "search_flights",
+        "technical_error": "failed"
+      },
+      "effect": {"kind": "none"}
+    },
+    "confirm_booking": {
+      "type": "ask",
+      "inputs": [
+        "inputs.origin",
+        "inputs.destination",
+        "inputs.departure_date",
+        "inputs.cabin",
+        "inputs.selected_flight_id",
+        "artifacts.cabin_quote"
+      ],
+      "outputs": ["inputs.booking_confirmed"],
+      "request": {
+        "kind": "confirmation",
+        "prompt": "请确认航班和价格",
+        "accepts": ["answer", "modify", "cancel"]
+      },
+      "on": {
+        "answer": "create_booking",
+        "cancel": "cancelled"
+      }
+    },
+    "create_booking": {
+      "type": "action",
+      "inputs": [
+        "inputs.selected_flight_id",
+        "artifacts.cabin_quote",
+        "inputs.booking_confirmed"
+      ],
+      "outputs": ["artifacts.booking"],
+      "requires": ["inputs.booking_confirmed == true"],
+      "tool": "booking.create@3",
+      "arguments": {
+        "flight_id": "{{ inputs.selected_flight_id }}",
+        "quote_id": "{{ artifacts.cabin_quote.id }}"
+      },
+      "result": {"value": "artifacts.booking"},
+      "statuses": {
+        "success": "completed",
+        "price_changed": "quote_cabin",
+        "technical_error": "failed"
+      },
+      "effect": {
+        "kind": "irreversible",
+        "idempotency_key": "{{ context.workflow_instance_id }}:booking",
+        "on_input_change": {
+          "mode": "redirect",
+          "node": "start_change_booking"
+        }
+      }
+    },
+    "start_change_booking": {
+      "type": "call",
+      "inputs": ["artifacts.booking"],
+      "workflow": {
+        "id": "flight_booking_change",
+        "version": "1.0.0"
+      },
+      "map_inputs": {
+        "booking_id": "artifacts.booking.id"
+      },
+      "map_outputs": {},
+      "on": {
+        "completed": "completed",
+        "cancelled": "completed",
+        "failed": "failed"
+      }
+    },
+    "no_result": {"type": "end", "outcome": "no_result"},
+    "cancelled": {"type": "end", "outcome": "cancelled"},
+    "failed": {"type": "end", "outcome": "failed"},
+    "completed": {
+      "type": "end",
+      "inputs": ["artifacts.booking"],
+      "outcome": "completed",
+      "result": {
+        "booking_id": "artifacts.booking.id"
+      }
+    }
+  },
+  "dependencies": [],
+  "policies": []
+}
+~~~
+
+该 Definition 不需要为 departure_date 手写完整 invalidates 清单。依赖链由 node.inputs 和 node.outputs 自动形成：
+
+~~~text
+departure_date
+→ flight_search
+→ selected_flight_id
+→ cabin_quote
+→ booking_confirmed
+→ booking
+~~~
+
+### 18.2 退款流程核心依赖
+
+~~~text
+inputs.account_relation
+inputs.phone_number
+        ↓
+artifacts.identity_verified
+        ↓
+artifacts.order
+   ┌────┼───────────┐
+   ↓    ↓           ↓
+play_history  refund_history  payment_channel
+   └────┼───────────┘
+        ↓
+refund_eligibility
+        ↓
+refund_confirmation
+        ↓
+refund_submission
+~~~
+
+核心节点：
+
+~~~json
+{
+  "verify_identity": {
+    "type": "call",
+    "inputs": ["inputs.phone_number"],
+    "outputs": ["artifacts.identity_verified"],
+    "workflow": {
+      "id": "identity_verification",
+      "version": "2.1.0"
+    },
+    "map_inputs": {
+      "phone_number": "inputs.phone_number"
+    },
+    "map_outputs": {
+      "verified": "artifacts.identity_verified"
+    },
+    "on": {
+      "completed": "find_order",
+      "cancelled": "cancelled",
+      "failed": "escalate"
+    }
+  },
+  "route_payment_channel": {
+    "type": "branch",
+    "inputs": ["artifacts.order"],
+    "cases": [
+      {
+        "when": "artifacts.order.payment_channel == 'ios'",
+        "next": "guide_apple_refund"
+      }
+    ],
+    "default": "evaluate_refund"
+  },
+  "evaluate_refund": {
+    "type": "action",
+    "inputs": [
+      "artifacts.order",
+      "artifacts.play_history",
+      "artifacts.refund_history",
+      "artifacts.identity_verified"
+    ],
+    "outputs": ["artifacts.refund_eligibility"],
+    "requires": ["artifacts.identity_verified == true"],
+    "tool": "refund.evaluate@4",
+    "result": {"value": "artifacts.refund_eligibility"},
+    "statuses": {
+      "eligible": "confirm_refund",
+      "ineligible": "report_ineligible",
+      "manual_review": "wait_manual_review",
+      "technical_error": "escalate"
+    },
+    "effect": {"kind": "none"}
   }
 }
-```
+~~~
 
-Harness 负责把“改成明天”解析为结构化 patch：
+手机号变化时，普通依赖传播会使身份相关结果 stale；安全 policy 进一步要求重新验证：
 
-```json
+~~~json
 {
-  "intent": "modify",
-  "slot_changes": {"departure_date": "2026-09-21"}
+  "id": "phone_changed_reverify",
+  "priority": 100,
+  "trigger": {
+    "type": "input.changed",
+    "ref": "inputs.phone_number"
+  },
+  "effects": [
+    {
+      "type": "invalidate",
+      "targets": [
+        "artifacts.identity_verified",
+        "artifacts.refund_eligibility"
+      ]
+    },
+    {
+      "type": "redirect",
+      "node": "verify_identity"
+    }
+  ],
+  "reason": "identity_scope_changed"
 }
-```
+~~~
 
-`slot_changes` 只是一轮消息的临时修改，不是持久化状态。引擎校验并应用它后，才更新 State 中的 slots，并按依赖图和 policies 失效 artifacts。
+---
 
-引擎还记录 `fact_sources` 和 `fact_revisions`：用户字段来源是 `user`，工具结果来源是 `tool:<name>`。只有用户拥有的 mutable input 可以被用户更正；工具拥有的订单、资格和成功状态不能被覆盖。
+# 附录 A：字段归属速查
 
-### 6.5 机票例子
+~~~text
+Workflow
+├── spec_version
+├── id
+├── version
+├── entry
+├── inputs
+├── artifacts
+├── nodes
+│   ├── type
+│   ├── inputs
+│   ├── outputs
+│   ├── requires
+│   ├── timeout
+│   ├── retry
+│   └── 节点类型专属字段
+├── dependencies
+└── policies
+~~~
 
-```text
-日期 9 月 19 日
-  → 查询航班
-  → 选择航班 F1
-  → 选择商务舱
-  → 获取报价
-  → 等待确认
+# 附录 B：核心概念对照
 
-用户：改成明天
-  → 更新日期并增加 revision
-  → 删除旧航班、旧选择、旧报价、旧确认
-  → 跳回 search_flights
-  → 重新选择航班、舱位、报价并确认
-```
-
-如果已经出票，不能继续使用这个“未确认预订”流程修改日期。应根据业务状态路由到独立的改签或退票 workflow。
-
-## 7. 事实、来源与权限
-
-`facts` 是案件上下文，不是模型的自由写入区：
-
-- Agent 可以从用户消息提取当前 `ask.collect` 声明的输入。
-- 工具可以写入订单、订阅、资格和操作结果。
-- Harness/引擎拒绝模型直接写入可信事实。
-- `requires`、分支条件和模板都只读取 facts。
-- 敏感值在工具调用后应通过 `consume_facts` 清除，并在审计日志中脱敏。
-
-生产环境还应对持久化的敏感输入做加密或短期保留。当前 CLI 原型使用 SQLite 演示流程语义，不能直接作为真实验证码存储方案。
-
-## 8. 校验分层
-
-写好一个 JSON 后，需要经过三层检查：
-
-1. **JSON Schema**：类型、必填字段、枚举、额外字段、节点结构。
-2. **语义 loader**：起点和所有跳转目标存在；工具已注册；每个工具状态都有迁移；表达式安全；mutable input 被 ask 收集且入口存在。
-3. **业务服务和工具门禁**：当前账号、订单渠道、退款资格和幂等状态在真实业务服务再次校验。
-
-Schema 通过不等于流程业务正确。比如 Schema 无法知道 Apple 订单不能调用自有退款工具，这个约束必须在 workflow 分支、工具权限和后端服务中同时实现。
-
-## 9. 最小编写流程
-
-1. 为稳定的业务目标创建一个 workflow ID 和版本。
-2. 列出用户输入、工具事实和允许修改的 mutable inputs。
-3. 先画节点和迁移，再写每个节点字段。
-4. 为每个 action 写全 `requires`、`on_guard_failure`、`result_statuses` 和 `transitions`。
-5. 为所有写操作配置幂等键。
-6. 为会被用户修改的上游输入列出完整 `invalidates` 集合。
-7. 运行 Schema 和语义校验，再用失败、超时、重复提交和用户更正场景测试。
-
-## 10. 原型兼容层和迁移顺序
-
-当前仓库原型与目标规范的对应关系如下：
-
-| 目标规范 | 当前原型 | 迁移方向 |
+| 概念 | 静态或运行时 | 作用 |
 |---|---|---|
-| State.slots | case.facts 中来源为 user 的事实 | 拆出独立 slots，并保存 owner 和 revision。 |
-| State.artifacts | case.facts 中来源为 tool 的事实 | 拆出 artifacts，增加 status、source 和 depends_on。 |
-| slots.change_policy | mutable_inputs | 迁移 restart_at、priority 和 invalidates。 |
-| 节点 inputs/outputs | 当前 action 的 args/requires/save_result_as | 增加显式输入输出，由编译器构建依赖图。 |
-| ask.allowed_intents | Harness 的修改关键词判断 | 增加意图分类和 intent_routes 白名单。 |
-| policies | 当前 workflow 中的手工 invalidates | 只保留无法由依赖图推导的业务和安全规则。 |
-
-迁移应按以下顺序进行：
-
-1. 先给 workflow 定义增加 slots 和 artifacts 契约，但继续由兼容层读写 facts。
-2. 再给 action 和 ask 增加 inputs、outputs，并编译静态依赖图。
-3. 将工具结果保存到 State.artifacts，记录 source、revision 和 depends_on。
-4. 用依赖图自动计算 stale 结果，保留 policies.invalidates 作为特殊规则。
-5. 最后移除 mutable_inputs 和 facts 的兼容读写。
-
-在迁移完成前，使用目标字段写出的 design workflow 不应被标记为可执行；应显式标注 status=design，并通过独立的目标规范校验器检查。
+| input declaration | 静态 | 定义外部输入合同 |
+| artifact declaration | 静态 | 定义派生事实合同 |
+| node.inputs/outputs | 静态 | 定义节点读写集合并生成基础依赖 |
+| dependencies | 静态 | 补充或覆盖自动依赖 |
+| policies | 静态 | 定义数据血缘之外的业务和安全规则 |
+| revision | 运行时 | 标识具体值版本 |
+| depends_on | 运行时 | 记录某次结果实际使用的上游 revision |
+| stale | 运行时 | 上游变化导致需要重算 |
+| invalid | 运行时 | 业务或安全规则明确撤销 |
