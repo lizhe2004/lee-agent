@@ -283,6 +283,23 @@ Interaction Act 描述用户对当前对话交互做了什么：
 
 Interaction Act 与当前 Workflow Instance 的交互上下文有关。
 
+#### 3.1.1 Interaction Act 与 Engine 事件的映射
+
+这里有两个不同层次的概念：
+
+- Workflow Definition 中的 `request.accepts` 是静态节点配置，表示哪些 Engine 事件可以结束当前 ask 等待；
+- `allowed_interaction_acts` 是 Harness 发给模型的运行时白名单，表示模型本轮可以识别并返回哪些 Interaction Act。
+
+Harness 根据可信的 Definition 和 Runtime State 固定生成下面的映射，模型不能自行增加、删除或改名：
+
+| Definition 中的 `request.accepts` | 模型允许的 Interaction Act | 作用 |
+|---|---|---|
+| 包含 `answer` | `answer` | 用户回答当前 ask；Harness 校验答案只填写 `pending_interaction.fields` |
+| 包含 `cancel` | `cancel_interaction` | 用户放弃当前 ask；它不等于取消订单、订阅或整个 Workflow |
+| 不适用 | `slot_change` | 用户修改仍可变的 Slot；这是实例级修改事件，不负责结束当前 ask，也不写入 `request.accepts` |
+
+因此，`answer` 和 `cancel_interaction` 是否可用取决于当前 ask 的 `request.accepts`；`slot_change` 是否可用取决于 `allowed_slots` 中是否存在可修改字段以及相关 Policy。这个映射是 Harness 的确定性规则，不是模型需要推断的业务逻辑。
+
 ### 3.2 Business Intent
 
 Business Intent 描述用户希望完成的业务目标，例如：
@@ -553,23 +570,6 @@ Harness 应：
 用户说“第二个”时，模型可以生成目标为 `slots.selected_flight_id`、候选值为 `MU5101` 的 `answer`。如果用户说出不在 options 中的航班号，Harness 必须拒绝该候选或发起澄清，不能把它当成当前选择题的有效答案。
 
 Harness 必须在自己的可信上下文中保存 `workflow_instance_id`、`interaction_id`、`node_id` 和 `expected_instance_revision`。这些控制字段不得放入 `pending_interaction`，模型也不得返回它们。
-
-#### 6.1.1 Engine 事件与模型动作的映射
-
-这里有两个不同层次的字段：
-
-- `request.accepts` 属于静态 Workflow Definition，表示 Engine 允许哪些事件结束当前 ask 等待；
-- `allowed_interaction_acts` 属于发给模型的运行时输入，表示模型本轮可以识别并返回哪些 Interaction Act。
-
-Harness 根据可信的 Definition 和 Runtime State 固定生成下面的映射，模型不能自行增加、删除或改名：
-
-| Definition 中的 `request.accepts` | 模型允许的 Interaction Act | 作用 |
-|---|---|---|
-| 包含 `answer` | `answer` | 用户回答当前 ask；Harness 校验答案只填写 `pending_interaction.fields` |
-| 包含 `cancel` | `cancel_interaction` | 用户放弃当前 ask；它不等于取消订单、订阅或整个 Workflow |
-| 不适用 | `slot_change` | 用户修改仍可变的 Slot；这是实例级修改事件，不负责结束当前 ask，也不写入 `request.accepts` |
-
-因此，`answer` 和 `cancel_interaction` 是否可用取决于当前 ask 的 `request.accepts`；`slot_change` 是否可用取决于 `allowed_slots` 中是否存在可修改字段以及相关 Policy。这个映射是 Harness 的确定性规则，不是模型需要推断的业务逻辑。
 
 ### 6.2 allowed_slots
 
