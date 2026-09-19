@@ -31,6 +31,24 @@
 
 外部组件如何传递用户消息和 Engine Command 有独立协议，但本文会直接说明 Definition 中每个字段对运行行为的影响。
 
+### 0.1 字段表中的类型记法
+
+| 记法 | 含义 |
+|---|---|
+| string、integer、number、boolean、object、array | 对应同名 JSON 类型；integer 是没有小数部分的 number |
+| enum | 封闭枚举；允许值必须在同一字段行或紧随其后的表中逐项列出 |
+| array<T> 或 T[] | 元素都符合 T 的 JSON 数组 |
+| object<K, V> | key 符合 K、value 符合 V 的 JSON 对象 |
+| identifier | 符合第 2.1 节命名规则的字符串 |
+| slot-ref、artifact-ref、data-ref | 分别引用 Slot、Artifact，或两者之一；均必须使用完整命名空间 |
+| node ID、workflow ID | 符合 identifier 规则并指向当前 Definition 或明确引用 Definition 的字符串 |
+| schema-ref、tool-ref | 已注册对象的准确版本引用，不能使用 `latest` 或版本范围 |
+| exact semver | `MAJOR.MINOR.PATCH` 形式的准确语义化版本 |
+| datetime、duration | 分别是带时区的 RFC 3339 时间和正 ISO 8601 时长 |
+| expression、template | 分别遵循第 2.4 节和第 2.5 节限制的字符串 |
+
+“必填”列说明字段必须出现的条件；“默认值”只在字段省略时生效。未明确允许的未知字段必须拒绝。
+
 # 第一部分：Definition 语言
 
 ## 1. 范围与设计原则
@@ -180,17 +198,17 @@ Slot 是 Workflow Instance 中允许外部主体提供、选择或修改的数�
 
 #### 4.1.1 Slot 字段
 
-| 字段 | 必填 | 含义 |
-|---|---:|---|
-| type | 是 | Slot 规范值的数据类型，例如 `date`、`boolean`、`enum` 或 `object`；所有写入都必须通过该类型校验 |
-| schema | object、array 等复杂类型时 | 复杂值必须符合的已注册结构版本，用于拒绝缺字段或类型错误的数据 |
-| values | `enum` 时 | 该枚举允许保存的完整规范值集合；展示文案可以本地化，但写入值只能来自此集合 |
-| required | 是 | 实例走到成功终态前该 Slot 是否必须有有效值；不表示启动实例时就必须提供 |
-| source | 是 | 哪类主体允许产生该值：用户、启动调用方、可信事件或系统默认逻辑；不在名单中的来源不得写入 |
-| mutable | 是 | 用户或调用方何时可以修改：从不、始终或只允许在不可逆 Effect 提交之前 |
-| default | 否 | 没有外部输入时由 Engine 使用的确定性默认值；不能依赖当前时间或随机结果，除非明确建模为系统输入 |
-| sensitive | 否 | 是否包含手机号、证件号等需要限制展示、日志和访问权限的数据，默认 `false` |
-| retention | 否 | 该值允许保留到本轮、整个实例、审计存档，或者完全不持久化 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| type | slot-type | 是 | 规范值类型；基础值允许 `string`、`integer`、`number`、`boolean`、`date`、`datetime`、`money`、`phone`、`email`、`enum`、`object`、`array`，扩展类型必须在注册表中存在 |
+| schema | schema-ref | `object`、`array` 或注册扩展类型时 | 已注册的准确结构版本，用于校验嵌套字段和类型；不能使用版本范围 |
+| values | array<any> | `enum` 时 | 非空、无重复的完整规范值集合；每项必须是同一种 JSON 类型 |
+| required | boolean | 是 | 成功终态前是否必须有有效值；不表示启动时必须提供 |
+| source | array<enum> | 是 | 至少一项且不得重复；只允许 `user`、`caller`、`event` 或 `system_default` |
+| mutable | enum | 是 | 只允许 `never`、`always` 或 `until_irreversible_effect` |
+| default | 与 type 一致 | 否 | 确定性默认规范值；必须通过类型校验，且 `source` 包含 `system_default` |
+| sensitive | boolean | 否 | 是否限制展示、日志和访问权限；省略等同于 `false` |
+| retention | enum | 否 | 只允许 `turn`、`instance`、`audit` 或 `none`；省略时由部署的数据治理策略决定 |
 
 required 不表示 Workflow 启动时必须已有该值。节点可以在真正使用之前收集它。
 
@@ -222,14 +240,15 @@ Artifact 是节点产生的派生事实。工具结果、计算结果、验证�
 }
 ~~~
 
-| 字段 | 必填 | 含义 |
-|---|---:|---|
-| type | 是 | Artifact 值的数据类型；生产节点提交结果时必须通过校验 |
-| schema | 复杂类型时 | 对象或数组必须符合的已注册结构版本 |
-| owner | 是 | 哪类受信任生产者可以生成该结果：工具、Engine 系统逻辑或子 Workflow；用户永远不能直接写入 |
-| validity.ttl | 否 | 结果从产生时起最多可使用多久；超期后标记为 stale，并在需要时重新生成 |
-| sensitive | 否 | 是否需要限制展示、日志和读取权限，默认 `false` |
-| retention | 否 | 结果允许保留到哪个范围，例如当前实例或审计记录 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| type | artifact-type | 是 | 使用与 Slot 相同的基础类型集合，也可使用已注册扩展类型；生产节点结果必须通过校验 |
+| schema | schema-ref | `object`、`array` 或注册扩展类型时 | 对象、数组或扩展值必须符合的准确结构版本 |
+| owner | enum | 是 | 只允许 `tool`、`engine` 或 `subworkflow`；用户不能直接写入 Artifact |
+| validity | object | 否 | 有效期规则；省略表示只按依赖版本和 Policy 判断有效性 |
+| validity.ttl | duration | validity 出现时 | 正 ISO 8601 时长；从 Artifact 产生时间起计算，超期后状态变为 `stale` |
+| sensitive | boolean | 否 | 是否限制展示、日志和读取权限；省略等同于 `false` |
+| retention | enum | 否 | 只允许 `instance`、`audit` 或 `none`；省略时由部署的数据治理策略决定 |
 
 Artifact 的 producer 由 node.outputs 推导，不在 artifact 中重复声明。默认每个 artifact 只有一个 producer。需要多来源合并时，应通过明确的 merge action 产生最终 artifact。
 
@@ -260,7 +279,7 @@ Artifact 的 producer 由 node.outputs 推导，不在 artifact 中重复声明�
 
 | 字段 | 类型 | 必填 | 默认值 | 含义 |
 |---|---|---:|---|---|
-| type | enum | 是 | 无 | 节点执行方式，例如 `ask`、`action`、`branch` 或 `end`；它决定还允许出现哪些专属字段 |
+| type | enum | 是 | 无 | 只允许 `ask`、`action`、`branch`、`respond`、`wait`、`call` 或 `end`；它决定还允许出现哪些专属字段 |
 | inputs | data-ref[] | 否 | `[]` | 该节点可能读取的全部 Slot 和 Artifact；Engine 用它检查可执行性、限制模板读取并建立数据依赖 |
 | outputs | data-ref[] | 否 | `[]` | 该节点唯一允许写入的 Slot 和 Artifact；工具多返回的字段也不能越过此白名单 |
 | requires | expression[] | 否 | `[]` | 节点执行前必须全部求值为 true 的业务或安全条件；false 和 unknown 都不执行节点 |
@@ -304,7 +323,7 @@ timeout 从节点进入 running 或 waiting 状态时开始计算。超时后只
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
 | max_attempts | integer | 是 | 包含首次执行在内的最大尝试次数，必须大于等于 1 |
-| strategy | enum | 是 | fixed、linear 或 exponential |
+| strategy | enum | 是 | 只允许 `fixed`、`linear` 或 `exponential` |
 | initial_delay | duration | 否 | 首次重试前等待时间 |
 | max_delay | duration | 否 | 单次重试等待上限 |
 | retry_on | error-code[] | 是 | 允许自动重试的错误集合 |
@@ -354,6 +373,17 @@ request 字段：
 | fields | slot-ref[] | 是 | 本次回答唯一允许写入的 Slot 完整引用，且必须同时出现在当前 Node 的 outputs 中 |
 | options_from | data-ref | `selection` 时 | 生成当前可选项列表的数据引用；它必须存在于 inputs，数据失效后旧选项也随之失效 |
 | accepts | event-type[] | 是 | 当前问题允许以哪些普通交互结果结束，例如回答或放弃；Slot 修改是实例级事件，不写在这里 |
+
+`request.kind` 是封闭枚举，不是展示提示。其组合约束如下：
+
+| kind 值 | fields 约束 | options_from 约束 | 目标 Slot 约束 |
+|---|---|---|---|
+| form | 一项或多项 | 禁止出现 | 每个字段都可以在本轮独立填写 |
+| selection | 恰好一项 | 必填 | options_from 的每个选项值必须能通过目标 Slot 类型校验 |
+| confirmation | 恰好一项 | 禁止出现 | 目标 Slot 的 type 必须为 `boolean` |
+| text | 恰好一项 | 禁止出现 | 用户原文最终仍须规范化为目标 Slot 类型 |
+
+`accepts` 至少包含 `answer`，元素只能是 `answer` 或 `cancel` 且不得重复。若包含 `cancel`，`on.cancel` 必须存在。
 
 on 必须覆盖 accepts 中所有会结束本次等待的事件。answer 事件只能写入 request.fields 和 node.outputs 共同声明的 slots，并且写入值必须通过 Slot 类型与来源校验。
 
@@ -620,12 +650,12 @@ slots.departure_date ─┘
 }
 ~~~
 
-| 字段 | 含义 |
-|---|---|
-| target | 依赖关系的下游 Slot 或 Artifact；任一实际使用的 source 变化时，它需要失效 |
-| sources | target 本次计算直接读取的上游数据引用；这里只声明一层关系，传递失效由 Engine 计算 |
-| mode | `extend` 在 Node 自动依赖上追加 sources；`replace` 用这里的 sources 完全替换自动依赖 |
-| when | 可选受限表达式；只有产生 target 时条件为 true，当前依赖边才生效并写入运行时血缘 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| target | data-ref | 是 | 下游 Slot 或 Artifact；必须由某个节点输出，且不能同时出现在 `sources` 中 |
+| sources | array<data-ref> | 是 | target 本次计算直接读取的一层上游引用；至少一项且不得重复，传递依赖由 Engine 计算 |
+| mode | enum | 是 | 只允许 `extend` 或 `replace`；前者追加自动依赖，后者完全替换自动依赖 |
+| when | expression | 否 | 只读取该条 `sources` 的受限布尔表达式；产生 target 时为 true 才记录这些运行时依赖边 |
 
 replace 可能造成漏失效，SHOULD 仅用于 output 确实只依赖部分 node.inputs 的情况。
 
@@ -683,24 +713,25 @@ Policy 只表达普通数据血缘无法完整推导的业务、安全或权限�
 
 Policy 字段：
 
-| 字段 | 必填 | 含义 |
-|---|---:|---|
-| id | 是 | Policy 的稳定唯一 ID，用于审计记录说明是哪条规则产生了影响 |
-| priority | 是 | 多条 Policy 同时命中时的计算顺序，数值越大越先处理；它不能用来覆盖显式冲突规则 |
-| trigger.type | 是 | 哪类已验证运行事件触发本 Policy，例如 Slot 改变、Artifact 过期或外部 Effect 已提交 |
-| trigger.ref | 事件类型需要目标时 | 触发事件必须涉及的具体 Slot 或 Artifact；省略时表示匹配该类型允许的全部目标 |
-| when | 否 | 读取已声明 Runtime 数据的附加条件；只有结果为 true 时才执行 effects |
-| effects | 是 | 命中后必须原子应用的一个或多个标准动作；不得在这里嵌入任意代码 |
-| reason | 是 | 机器可读的稳定原因，供 Decision、审计和用户解释策略引用 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| id | identifier | 是 | Definition 内唯一的稳定 Policy ID |
+| priority | integer | 是 | 多条 Policy 同时命中时按数值从大到小计算；相同值按 ID 字典序保证确定性，但不能借此掩盖 redirect 冲突 |
+| trigger | object | 是 | 触发事件匹配条件 |
+| trigger.type | enum | 是 | 只允许 `slot.changed`、`artifact.changed`、`artifact.expired`、`external.event`、`effect.committed` 或 `permission.changed` |
+| trigger.ref | data-ref | 事件类型涉及数据目标时 | 必须是已声明的 Slot 或 Artifact；省略时匹配该事件类型允许的全部目标 |
+| when | expression | 否 | 附加布尔条件；只有结果为 true 才执行 effects，false 或 unknown 均不执行 |
+| effects | array<policy-effect> | 是 | 至少一个标准动作；按数组顺序求值，但必须作为一个原子结果提交 |
+| reason | string | 是 | 非空、稳定的机器原因，供 Decision、审计和解释策略引用 |
 
 标准 effect：
 
-| effect | 含义 |
-|---|---|
-| invalidate | 把指定 Slot 或 Artifact 标记为 invalid，后续节点不能再使用旧值 |
-| require_revalidation | 要求指定验证类结果重新产生，例如手机号变化后重新验证身份 |
-| block | 拒绝当前触发操作并返回稳定原因；Runtime State 不得出现部分修改 |
-| redirect | 当前事件处理完成后强制进入指定节点，例如已经出票后改日期必须进入改签流程 |
+| effect.type | 必填字段 | 含义与约束 |
+|---|---|---|
+| invalidate | `targets: array<data-ref>` | 把至少一个指定数据标记为 `invalid`；targets 不得重复 |
+| require_revalidation | `targets: array<artifact-ref>` | 撤销至少一个验证类 Artifact，并要求其 producer 重新执行 |
+| block | `code: string` | 原子拒绝触发操作；code 是返回给 Decision 的稳定原因，State 不得部分修改 |
+| redirect | `node: node-id` | 事件处理后进入已声明节点；不能指向不存在的节点或绕过已经提交副作用所需的补偿 |
 
 Policy 不得直接产生业务成功结果，也不得把 invalid 数据改回 valid。
 
@@ -1000,11 +1031,11 @@ action 必须声明 none、reversible 或 irreversible。reversible 或 irrevers
 
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
-| kind | enum | 是 | none、reversible、irreversible |
+| kind | enum | 是 | 只允许 `none`、`reversible` 或 `irreversible` |
 | idempotency_key | template | reversible/irreversible 时 | 相同业务操作重复执行时使用的稳定键 |
 | compensation | object | compensate 时 | 补偿工具、参数、状态映射和失败路径 |
 | on_slot_change | object | irreversible 时 | 已提交副作用依赖的 Slot 变化后如何处理 |
-| on_slot_change.mode | enum | 是 | reject、redirect、compensate |
+| on_slot_change.mode | enum | 是 | 只允许 `reject`、`redirect` 或 `compensate` |
 | on_slot_change.node | node ID | redirect 时 | 修改发生后进入的节点 |
 
 idempotency_key 引用的数据必须包含在 node.inputs 或 context 允许字段中。compensation 本身也是副作用，必须具有独立幂等键和可审计结果。

@@ -31,6 +31,22 @@
 
 另外两份规范用于定义这些对象的完整执行规则；本文会在字段第一次出现时给出足以理解本协议的含义。
 
+### 0.1 字段表中的类型记法
+
+| 记法 | 含义 |
+|---|---|
+| string、integer、number、boolean、object、array、null | 对应同名 JSON 类型；integer 是没有小数部分的 number |
+| enum | 封闭枚举；允许值必须在同一字段行或紧随其后的约束表中逐项列出，未列出的值非法 |
+| const string | 只能等于字段行指定的唯一字符串 |
+| array<T> | 元素都符合 T 的 JSON 数组；是否允许空数组由字段约束说明 |
+| object<K, V> | key 符合 K、value 符合 V 的 JSON 对象 |
+| A \| B | 值可以是 A 或 B 两种类型之一 |
+| datetime | 带时区偏移的 RFC 3339 日期时间字符串 |
+| slot-ref | 形如 `slots.departure_date` 的完整 Slot 引用 |
+| any | JSON 值的形状由被引用 Slot、Intent Entity 或其他明确合同决定，不表示跳过校验 |
+
+“必填”列描述字段在什么条件下必须出现；“否”表示字段可以省略，不等于可以传入任意值。本文未明确允许的未知字段必须拒绝。
+
 ## 1. 协议目标与边界
 
 ### 1.1 目标
@@ -279,12 +295,14 @@ Ambiguity 表示某个值、指代、动作或意图存在多个合理解释，�
     "slots.departure_date": {
       "type": "date",
       "mutable": true,
-      "current_value": "2026-09-19"
+      "current_value": "2026-09-19",
+      "description": "乘客希望出发的日期"
     },
     "slots.booking_confirmed": {
       "type": "boolean",
       "mutable": true,
-      "current_value": null
+      "current_value": null,
+      "description": "用户是否确认购买当前展示的航班和价格"
     }
   },
   "intent_catalog": [
@@ -304,27 +322,27 @@ Ambiguity 表示某个值、指代、动作或意图存在多个合理解释，�
 
 ### 4.2 顶层字段
 
-| 字段 | 必填 | 含义 |
-|---|---:|---|
-| interpretation_version | 是 | 本次模型输入使用的结构版本；模型必须在结果中原样返回，Harness 用它选择对应的校验规则 |
-| utterance | 是 | 本轮刚收到的用户消息，包括消息 ID、原文、语言和接收时间；这是模型本轮需要解释的主要内容 |
-| locale | 是 | 用户使用的地区语言格式，例如 `zh-CN`；用于解释数字、日期写法和生成适合用户的澄清问题 |
-| timezone | 出现日期或时间时 | 解释“今天”“明天”“晚上八点”等表达所使用的时区，例如 `Asia/Shanghai` |
-| reference_time | 出现相对日期或时间时 | 相对时间计算的固定基准时刻；模型不得使用自身系统时间代替它 |
-| conversation_context | 需要历史语境时 | Harness 选择的历史摘要、最近消息和较早的相关消息，用于理解“那个”“还是原来的”等省略表达 |
-| pending_interaction | 系统正在等待用户回答时 | 当前问题的语义描述，包含问题类型、展示文本、可回答字段和可选项；没有待回答问题时省略，并且永远不包含 `interaction_id`、节点 ID 或 revision |
-| allowed_interaction_acts | 是 | 本轮允许模型识别的交互动作类型白名单，例如 `answer`、`slot_change`；模型不得输出名单之外的动作 |
-| allowed_slots | 是 | 本轮允许模型回答或修改的业务变量及其类型、当前值和可修改性；空对象表示本轮不能写任何 Slot |
-| intent_catalog | 是 | 本轮允许模型识别的业务目标目录，每项包含稳定 ID 和语义说明；空数组表示本轮不做业务意图分类 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| interpretation_version | string | 是 | 本次模型输入使用的结构版本；模型必须在结果中原样返回，Harness 用它选择对应校验规则 |
+| utterance | object | 是 | 本轮刚收到的用户消息，包括消息 ID、原文、语言和接收时间；这是模型本轮需要解释的主要内容 |
+| locale | string | 是 | BCP 47 地区语言代码，例如 `zh-CN`；用于解释数字、日期写法和生成澄清问题 |
+| timezone | string | 出现日期或时间时 | IANA 时区名称，例如 `Asia/Shanghai`；禁止只写容易歧义的缩写 |
+| reference_time | datetime | 出现相对日期或时间时 | RFC 3339 基准时刻；“今天”“明天”等表达只能相对它计算 |
+| conversation_context | object | 需要历史语境时 | Harness 选择的历史摘要、最近消息和较早相关消息，用于理解省略和指代 |
+| pending_interaction | object | 系统正在等待用户回答时 | 当前问题的语义描述；没有待回答问题时省略，且不得包含 Engine 内部 ID、节点 ID 或 revision |
+| allowed_interaction_acts | array<enum> | 是 | 本轮允许模型输出的动作类型集合；元素只允许 `answer`、`slot_change`、`cancel_interaction`，不得重复，数组可为空 |
+| allowed_slots | object<slot-ref, slot-descriptor> | 是 | Slot 完整引用到字段描述的映射；空对象表示本轮不能回答或修改任何 Slot |
+| intent_catalog | array<intent-definition> | 是 | 本轮允许识别的业务目标定义；空数组表示本轮不做业务意图分类 |
 
 ### 4.3 utterance
 
-| 字段 | 含义 |
-|---|---|
-| id | 渠道为本条用户消息分配的稳定 ID；模型结果中的 `utterance_id` 必须与它相同 |
-| text | 用户实际发送的原文；Harness 可以另做分词或检索，但不得用改写文本替换这里的原文 |
-| language | Harness 检测到的消息语言，例如 `zh-CN`；无法可靠判断时为 `null` |
-| received_at | Harness 从渠道收到消息的时间，用于审计和消息排序，不代替 `reference_time` |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| id | string | 是 | 渠道为本条消息分配的稳定 ID；结果中的 `utterance_id` 必须与它相同 |
+| text | string | 是 | 用户实际发送的非空原文；不得用摘要、翻译或改写文本替代 |
+| language | string \| null | 是 | 检测到的 BCP 47 语言代码；无法可靠判断时为 `null` |
+| received_at | datetime | 是 | 渠道收到消息的 RFC 3339 时间，用于审计和排序，不代替 `reference_time` |
 
 `utterance` 是本轮理解的主要对象。历史消息用于消解省略、代词和上下文，不能覆盖当前消息中的明确表达。
 
@@ -371,15 +389,18 @@ Ambiguity 表示某个值、指代、动作或意图存在多个合理解释，�
 }
 ~~~
 
-| 字段 | 含义 |
-|---|---|
-| summary | 对较早对话的压缩文字；可能遗漏细节，只用于帮助理解语境，不能证明身份验证或业务操作已经完成 |
-| summary.text | 摘要正文，应描述已经讨论的对象和用户表达，不得伪造 Engine 状态或工具结果 |
-| summary.through_message_id | 摘要已经覆盖到的最后一条消息 ID；用于避免又把同一段历史重复放入 `recent_turns` |
-| recent_turns | 紧邻当前消息之前的若干条用户和客服原文，按时间从旧到新排列 |
-| relevant_turns | 从更早历史中检索出的少量相关原文，例如用户再次提到“上个月那笔订单”时检索到原订单描述 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| summary | object | 否 | 对较早对话的压缩内容；只能帮助理解语境，不能证明身份验证或业务操作已经完成 |
+| summary.text | string | summary 出现时 | 非空摘要正文；应描述已经讨论的对象和用户表达，不得伪造 Engine 状态或工具结果 |
+| summary.through_message_id | string | summary 出现时 | 摘要覆盖到的最后一条消息 ID；该消息及更早消息不得再放入 `recent_turns` |
+| recent_turns | array<turn> | 是 | 紧邻当前消息之前的用户和客服原文，按时间从旧到新排列；没有时为空数组 |
+| relevant_turns | array<turn> | 是 | 从 summary 覆盖范围内检索出的少量相关原文；没有时为空数组 |
+| recent_turns[].message_id | string | 每个 turn 必填 | 渠道分配的稳定消息 ID，且必须早于当前 `utterance.id` 所代表的消息 |
+| recent_turns[].role | enum | 每个 turn 必填 | 只允许 `user` 或 `assistant` |
+| recent_turns[].text | string | 每个 turn 必填 | 经过必要脱敏的非空消息原文 |
 
-每个 turn 包含稳定的 `message_id`、`role` 和经过必要脱敏的 `text`。
+`relevant_turns` 的元素使用与 `recent_turns` 相同的 turn 结构。一个 `message_id` 不得在两个数组中重复出现。
 
 ### 5.3 摘要的限制
 
@@ -423,12 +444,43 @@ Harness 应：
 
 `pending_interaction` 只在系统已经向用户提出问题并正在等待回答时出现。没有待回答问题时整个字段省略。
 
-| 字段 | 含义 |
-|---|---|
-| kind | 用户应该用什么形式回答：填写表单、从列表选择、确认是非或输入自由文本 |
-| prompt | 当前向用户提出的问题文字，模型用它理解“确认”“第一个”等依赖问题内容的回答 |
-| fields | 本次回答允许填写的 Slot 完整引用；模型输出 `answer` 时只能引用这里列出的字段 |
-| options | 列表选择时当前仍有效的选项；每项包含提交用的稳定 `value` 和给用户看的 `label`，非选择题通常为空数组 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| kind | enum | 是 | 回答形式，只允许 `form`、`selection`、`confirmation`、`text`；每个值的组合约束见下表 |
+| prompt | string | 是 | 当前向用户提出的非空问题文字，模型用它理解“确认”“第一个”等依赖问题内容的回答 |
+| fields | array<slot-ref> | 是 | 本次回答允许填写的 Slot 完整引用；至少一项、不得重复，且每项必须同时存在于 `allowed_slots` |
+| options | array<option> | 是 | 当前选择题选项；`selection` 时至少一项，其他 kind 时必须为空数组 |
+| options[].value | 与目标 Slot 相同 | 每个 option 必填 | 提交给 Engine 的规范值；必须通过目标 Slot 类型校验，且同一 options 数组中不得重复 |
+| options[].label | string | 每个 option 必填 | 展示给用户的非空文本；模型可用它理解“第一个”或用户复述的选项名称 |
+
+`kind` 的允许值和结构约束：
+
+| kind 值 | fields 约束 | options 约束 | 回答语义 |
+|---|---|---|---|
+| form | 一项或多项 | 必须为空数组 | 用户可以在一轮中填写 `fields` 中的一个或多个字段 |
+| selection | 恰好一项 | 至少一项 | 用户从当前有效选项中选择一个值；`answers[].candidate_value` 必须等于某个 `options[].value` |
+| confirmation | 恰好一项，且目标 Slot 的 `type` 必须是 `boolean` | 必须为空数组 | 用户确认或拒绝当前问题，候选规范值只能是 `true` 或 `false` |
+| text | 恰好一项 | 必须为空数组 | 用户自由表达一个字段值；Harness 仍按目标 Slot 类型做规范化和校验 |
+
+因此 `kind` 既不是任意字符串，也不是给 UI 的展示提示。它是影响 Interpretation Result 校验规则的封闭枚举。未知值必须被 Harness 拒绝。
+
+例如，Engine 正在让用户从当前航班列表中选择一项时，Harness 可以给模型以下视图：
+
+~~~json
+{
+  "pending_interaction": {
+    "kind": "selection",
+    "prompt": "请选择航班",
+    "fields": ["slots.selected_flight_id"],
+    "options": [
+      {"value": "CA123", "label": "CA123，10:00 起飞"},
+      {"value": "MU5101", "label": "MU5101，11:20 起飞"}
+    ]
+  }
+}
+~~~
+
+用户说“第二个”时，模型可以生成目标为 `slots.selected_flight_id`、候选值为 `MU5101` 的 `answer`。如果用户说出不在 options 中的航班号，Harness 必须拒绝该候选或发起澄清，不能把它当成当前选择题的有效答案。
 
 Harness 必须在自己的可信上下文中保存 `workflow_instance_id`、`interaction_id`、`node_id` 和 `expected_instance_revision`。这些控制字段不得放入 `pending_interaction`，模型也不得返回它们。
 
@@ -444,14 +496,16 @@ Workflow Definition 中 `request.accepts` 声明的是 Engine 交互事件。Har
 
 每个 Slot 描述可包含：
 
-| 字段 | 含义 |
-|---|---|
-| type | 规范值的数据类型，例如 `date`、`boolean`、`enum`；模型候选值最终必须能通过该类型校验 |
-| mutable | 用户在当前流程阶段是否仍能修改该变量；为 `false` 时模型不得生成针对它的 `slot_change` |
-| current_value | Engine 当前保存的规范值，只在理解“改一下”“还是原来那个”等表达确实需要时提供 |
-| values | `enum` 类型允许使用的完整规范值集合；模型只能从中选择，不能自行创建新值 |
-| sensitive | 表示该变量是否包含手机号、证件号等敏感信息；Harness 据此决定掩码、日志和保留策略 |
-| description | 变量在业务中的直接含义，例如“乘客希望出发的日期”；不能在这里夹带流程跳转或工具调用指令 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| type | slot-type | 是 | 目标 Slot 的规范值类型，例如 `string`、`date`、`boolean`、`enum`；候选值必须能通过该类型校验 |
+| mutable | boolean | 是 | 用户在当前流程阶段是否可以修改该 Slot；为 `false` 时不得输出针对它的 `slot_change` |
+| current_value | 与 type 一致 \| null | 否 | Engine 当前保存的规范值；只在理解更正、指代或“保持原值”确实需要时提供，尚无值时可为 `null` |
+| values | array<any> | type 为 enum 时 | enum 的完整允许值集合；每项类型必须与 Slot 一致，且不得重复 |
+| sensitive | boolean | 否 | 是否包含手机号、证件号等敏感信息；省略等同于 `false` |
+| description | string | 是 | Slot 的非空业务含义；不能夹带流程跳转、工具调用或权限指令 |
+
+本协议内置的 `slot-type` 允许 `string`、`integer`、`number`、`boolean`、`date`、`datetime`、`money`、`phone`、`email`、`enum`、`object` 和 `array`。使用注册扩展类型时，Harness 必须把模型候选交给对应的确定性校验器，不能让模型自行定义类型语义。
 
 敏感 Slot 的 `current_value` 应省略、掩码或只提供“是否存在”，除非理解当前消息确实需要该值。
 
@@ -480,13 +534,13 @@ Intent Catalog 让模型把自然语言映射为稳定的 Business Intent ID。�
 }
 ~~~
 
-| 字段 | 必填 | 含义 |
-|---|---:|---|
-| id | 是 | 程序使用的稳定业务目标 ID，例如 `refund_request`；修改自然语言描述时不应更改这个 ID |
-| description | 是 | 该业务目标包含什么、不包含什么的直接说明，模型以它作为分类依据 |
-| positive_examples | 否 | 属于该意图的典型用户表达，用于帮助分类，不代表只有这些说法才能命中 |
-| negative_examples | 否 | 与该意图容易混淆但不属于它的表达，用于划清相邻意图边界 |
-| allowed_entities | 否 | 模型在识别该意图时可以一并提取的有限字段名称，例如订单引用；未列出的实体不得输出 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| id | string | 是 | 程序使用的稳定、非空业务目标 ID，例如 `refund_request`；同一 Catalog 内必须唯一 |
+| description | string | 是 | 该业务目标包含和排除范围的直接说明，模型以它作为分类依据 |
+| positive_examples | array<string> | 否 | 属于该意图的典型表达；每项必须非空，不代表只有这些说法才能命中 |
+| negative_examples | array<string> | 否 | 容易混淆但不属于该意图的表达，用于划清相邻意图边界 |
+| allowed_entities | array<string> | 否 | 允许随该意图提取的实体名称白名单；不得重复，省略等同于空数组 |
 
 Intent Catalog 不应包含：
 
@@ -522,15 +576,15 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 
 ### 8.2 顶层字段
 
-| 字段 | 必填 | 含义 |
-|---|---:|---|
-| interpretation_version | 是 | 模型实际采用的结果结构版本，必须与输入版本相同 |
-| utterance_id | 是 | 本结果所解释的用户消息 ID，必须等于输入的 `utterance.id`，防止异步结果绑定到错误消息 |
-| language | 是 | 模型用来理解本条消息的语言；可用于发现输入语言检测错误 |
-| interaction_acts | 是 | 用户对当前待处理问题或已有 Slot 做出的动作，例如回答、修改或放弃当前问题；没有时为空数组 |
-| business_intents | 是 | 用户本轮明确提出并成功映射到 Intent Catalog 的业务目标；不包含“新建还是继续 Workflow”的判断 |
-| unmapped_requests | 是 | 用户明确提出但无法映射到本次 Intent Catalog 的请求摘要；它不代表系统最终不支持 |
-| ambiguities | 是 | 会影响结构化执行且无法唯一解释的值、指代、动作或意图；没有时为空数组 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| interpretation_version | string | 是 | 模型实际采用的结果结构版本，必须与输入版本完全相同 |
+| utterance_id | string | 是 | 必须等于输入的 `utterance.id`，防止异步结果绑定到错误消息 |
+| language | string \| null | 是 | 模型用于理解本条消息的 BCP 47 语言代码；无法可靠判断时为 `null` |
+| interaction_acts | array<interaction-act> | 是 | 对待处理问题或已有 Slot 的动作；没有时为空数组，每项类型必须位于 `allowed_interaction_acts` |
+| business_intents | array<business-intent> | 是 | 本轮明确表达且映射到 Intent Catalog 的业务目标；没有时为空数组，同一 intent 不得重复 |
+| unmapped_requests | array<unmapped-request> | 是 | 本轮明确表达但无法映射到 Catalog 的请求；没有时为空数组 |
+| ambiguities | array<ambiguity> | 是 | 会影响执行且无法唯一解释的歧义；没有时为空数组 |
 
 未知顶层字段必须被 Harness 拒绝。模型名称、调用 ID、延迟和 token 用量由 Harness 从模型客户端取得并记录。
 
@@ -563,6 +617,15 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 ~~~
 
 `start` 和 `end` 使用 Unicode code point 索引，区间左闭右开。`evidence.text` 必须与对应消息原文的切片一致。
+
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| message_id | string | 是 | Evidence 所引用的原始消息 ID；必须来自 Request 中可见的 utterance 或 turn |
+| text | string | 是 | 对应原始消息中的连续非空片段 |
+| start | integer | 是 | `text` 在原消息中的 Unicode code point 起始索引，必须大于等于 0 |
+| end | integer | 是 | 片段结束后的索引，必须大于 `start`，且不得超过原消息长度 |
+
+必须满足：`original_message[start:end] == text`。同一字段需要多段证据时，应使用多个结构化结果，而不能把不连续文本拼成一个 Evidence。
 
 默认要求 Business Intent 以当前 utterance 为证据。历史消息可以帮助消解指代，但模型不能只根据历史消息重复产生用户本轮没有表达的业务目标。
 
@@ -602,15 +665,15 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 }
 ~~~
 
-| 字段 | 必填 | 含义 |
-|---|---:|---|
-| type | 是 | 固定为 `answer` |
-| answers | 是 | 本轮对当前问题填写的一个或多个字段，至少包含一项 |
-| answers[].ref | 是 | 被回答的 Slot 完整引用，必须出现在 `pending_interaction.fields` 中 |
-| answers[].raw_value | 是 | 用户表达该答案时使用的原文片段，例如“明天”或“第一个” |
-| answers[].candidate_value | 是 | 模型按 Slot 类型转换后的候选规范值，例如 `2026-09-20`；Harness 仍会重新规范化和校验 |
-| answers[].confidence | 是 | 模型对该字段和值映射的自评置信度，范围为 0 到 1，不提供写入权限 |
-| answers[].evidence | 应有 | 指向支持该答案的消息 ID 和原文区间，供 Harness 校验候选值确实来自用户表达 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| type | const string | 是 | 固定为 `answer` |
+| answers | array<answer-item> | 是 | 本轮对当前问题填写的字段；至少一项，同一个 ref 不得重复 |
+| answers[].ref | slot-ref | 是 | 必须出现在 `pending_interaction.fields` 中 |
+| answers[].raw_value | string | 是 | 用户表达该答案时使用的非空原文片段，例如“明天”或“第一个” |
+| answers[].candidate_value | any | 是 | 按目标 Slot 类型转换后的候选规范值；Harness 仍会重新规范化和校验 |
+| answers[].confidence | number | 是 | 模型自评置信度，范围为闭区间 `[0, 1]`，不提供写入权限 |
+| answers[].evidence | evidence | 是 | 支持该答案的消息与原文区间；必须通过第 9.1 节校验 |
 
 `answer` 只能回答当前 ask，不能顺便写入其他 Slot。选项型回答必须匹配 `pending_interaction.options[].value`。
 
@@ -636,15 +699,15 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 }
 ~~~
 
-| 字段 | 必填 | 含义 |
-|---|---:|---|
-| type | 是 | 固定为 `slot_change` |
-| changes | 是 | 用户本轮要求修改的字段列表，至少包含一项 |
-| changes[].ref | 是 | 被修改的 Slot 完整引用，必须存在于 `allowed_slots` 且当前允许用户修改 |
-| changes[].raw_value | 是 | 用户表达新值时使用的原文片段 |
-| changes[].candidate_value | 是 | 模型转换出的候选规范值；Harness 校验通过后才会进入 Engine Command |
-| changes[].confidence | 是 | 模型对“用户确实在修改该字段”和候选值的自评置信度 |
-| changes[].evidence | 应有 | 支持本次修改的消息 ID 和原文区间 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| type | const string | 是 | 固定为 `slot_change` |
+| changes | array<slot-change-item> | 是 | 用户本轮要求修改的字段；至少一项，同一个 ref 不得重复 |
+| changes[].ref | slot-ref | 是 | 必须存在于 `allowed_slots`，且其 `mutable` 为 `true` |
+| changes[].raw_value | string | 是 | 用户表达新值时使用的非空原文片段 |
+| changes[].candidate_value | any | 是 | 按目标 Slot 类型转换出的候选规范值；Harness 校验通过后才可进入 Engine Command |
+| changes[].confidence | number | 是 | 模型对修改语义和值映射的自评置信度，范围为闭区间 `[0, 1]` |
+| changes[].evidence | evidence | 是 | 支持本次修改的消息与原文区间；必须通过第 9.1 节校验 |
 
 模型不能输出 `invalidates`、`restart_at`、`target_node` 或 Policy。Harness 将全部合法变化合并为一个原子 `slot.change` Command。失效和重算由 Engine 根据 Workflow Definition 的依赖图计算。
 
@@ -664,6 +727,12 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 ~~~
 
 `cancel_interaction` 只表示用户放弃当前 ask。它不等于取消订单、取消订阅或终止整个案件。
+
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| type | const string | 是 | 固定为 `cancel_interaction` |
+| confidence | number | 是 | 模型对“用户正在放弃当前问题”的自评置信度，范围为闭区间 `[0, 1]` |
+| evidence | evidence | 是 | 当前消息中表达放弃的原文区间 |
 
 “取消机票订单”属于 `cancel_booking` 一类 Business Intent；“关闭自动续费”属于 `cancel_auto_renewal`。这些目标由 Intent Catalog 识别，再由 Router 调度。
 
@@ -685,12 +754,17 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 }
 ~~~
 
-| 字段 | 必填 | 含义 |
-|---|---:|---|
-| intent | 是 | 与用户业务目标最匹配的 `intent_catalog[].id`；模型不能生成目录之外的 ID |
-| confidence | 是 | 模型对当前用户消息与该业务目标相匹配程度的自评值 |
-| evidence | 应有 | 当前用户消息中明确表达该业务目标的原文区间；不能只引用历史摘要 |
-| entities | 否 | 目录允许随该意图提前提取的字段和值；Router 可以用它们选择能力，但仍需后续 Workflow 校验 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| intent | string | 是 | 必须等于某个 `intent_catalog[].id`；同一结果数组中不得重复 |
+| confidence | number | 是 | 匹配程度的模型自评值，范围为闭区间 `[0, 1]` |
+| evidence | evidence | 是 | 当前 utterance 中明确表达该业务目标的原文区间；不能只引用历史摘要 |
+| entities | array<entity> | 是 | 随该意图提取的实体；没有时为空数组，名称必须位于该 Catalog 条目的 `allowed_entities` |
+| entities[].name | string | 每个 entity 必填 | Intent Catalog 允许的实体名称 |
+| entities[].raw_value | string | 每个 entity 必填 | 用户表达该实体时使用的非空原文片段 |
+| entities[].candidate_value | any | 每个 entity 必填 | 模型转换出的候选值；Router 或 Workflow 仍需按目标字段重新校验 |
+| entities[].confidence | number | 每个 entity 必填 | 模型自评置信度，范围为闭区间 `[0, 1]` |
+| entities[].evidence | evidence | 每个 entity 必填 | 支持该实体的消息和原文区间 |
 
 以下字段在 Business Intent 中非法：
 
@@ -728,6 +802,12 @@ parallel
 
 Unmapped Request 只说明模型未在本次 Intent Catalog 中找到可靠映射。Harness 将其交给 Router 或能力发现组件。模型和 Harness 不得直接把它改写为 `unsupported`。
 
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| summary | string | 是 | 用户请求的简短、非空语义摘要；不得添加用户没有表达的目标 |
+| evidence | evidence | 是 | 当前 utterance 中支持该请求的原文区间 |
+| confidence | number | 是 | 模型对摘要是否准确表达该请求的自评值，范围为闭区间 `[0, 1]` |
+
 ### 12.2 Ambiguity
 
 ~~~json
@@ -741,14 +821,14 @@ Unmapped Request 只说明模型未在本次 Intent Catalog 中找到可靠映�
 }
 ~~~
 
-| 字段 | 含义 |
-|---|---|
-| kind | 程序可判断处理方式的歧义类别，例如 `reference`、`date` 或 `intent` |
-| about | 哪个 Slot、Interaction Act 或 Business Intent 因该歧义而不能继续处理 |
-| message_id | 引发歧义的原文所在消息 ID |
-| text | 无法唯一解释的原文片段，例如“那个航班” |
-| candidates | 当前上下文中可能的有限候选；无法可靠列举时使用空数组 |
-| suggested_question | 模型建议向用户提出的问题；Harness 必须校验和转义后才能展示 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| kind | enum | 是 | 歧义类别，只允许 `reference`、`value`、`date`、`action`、`intent` 或 `conflict` |
+| about | string | 是 | 受阻的 Slot 引用、Interaction Act 类型、Intent ID 或稳定语义标签 |
+| message_id | string | 是 | 引发歧义的原文消息 ID，必须来自 Request 中可见的消息 |
+| text | string | 是 | 无法唯一解释的非空原文片段，必须能在该消息中定位 |
+| candidates | array<any> | 是 | 当前上下文中的有限候选；无法可靠列举时为空数组，不得杜撰候选 |
+| suggested_question | string | 是 | 建议向用户提出的非空问题；Harness 必须校验、转义后才能展示 |
 
 Harness 可以重新表述 `suggested_question`，但不得在用户澄清前代替用户选择候选。
 
@@ -957,6 +1037,23 @@ Business Intent 不编译为当前 Workflow Command。Harness 生成：
 
 Router Request 不声明意图是“新”的，也不包含目标 Workflow。
 
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| router_protocol_version | string | 是 | Router Request 的结构版本 |
+| request_id | string | 是 | Harness 生成的全局唯一请求 ID，用于幂等处理和关联 Router Decision |
+| utterance_id | string | 是 | 产生本请求的当前用户消息 ID |
+| actor | object | 是 | 已认证业务主体；由 Harness 的可信会话上下文构造，不能来自模型输出 |
+| actor.type | enum | 是 | 只允许 `user`、`system` 或 `operator`；普通自然语言用户使用 `user` |
+| actor.id | string | 是 | 认证系统确认的稳定主体 ID |
+| actor.tenant_id | string | 多租户时 | 主体所属租户；必须与 Router 查询能力目录时使用的租户一致 |
+| actor.roles | array<string> | 否 | 认证系统确认的角色；不得重复，不得从用户自述中提取 |
+| channel | string | 是 | 已认证或配置得到的渠道 ID，例如 `cli`；不能由用户文本决定 |
+| business_intents | array<business-intent> | 是 | 已通过 Catalog、Evidence 和白名单校验的业务意图；没有时为空数组 |
+| unmapped_requests | array<unmapped-request> | 是 | 已通过 Evidence 校验但未映射的请求；没有时为空数组 |
+| source_order | array<source-item> | 是 | 记录两类请求在原消息中的语义顺序；每个业务意图或未映射请求必须恰好出现一次 |
+| source_order[].kind | enum | 每个 source-item 必填 | 只允许 `business_intent` 或 `unmapped_request` |
+| source_order[].index | integer | 每个 source-item 必填 | 对应数组中的零起始索引，不能越界或重复引用同一项 |
+
 ### 17.2 Router 的可信输入
 
 Router 自己读取：
@@ -1020,6 +1117,20 @@ Harness 最终只返回以下四种状态：
 | routing_required | 本轮只提出业务目标或无法映射的请求 | 把 `router_requests` 交给 Intent Router，由 Router 决定使用哪个 Workflow |
 | commands_and_routing_ready | 同一句话同时包含当前流程修改和独立业务目标 | 分别提交 `commands` 和 `router_requests`，并保留原消息中的语义顺序 |
 | clarification_required | 存在会影响执行正确性的歧义或冲突 | 不提交受影响的 Command，向用户展示 `user_response` 中的澄清问题 |
+
+所有状态使用同一个输出信封：
+
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| status | enum | 是 | 只允许 `commands_ready`、`routing_required`、`commands_and_routing_ready` 或 `clarification_required` |
+| utterance_id | string | 是 | 必须等于本轮 Interpretation Request 的 `utterance.id` |
+| commands | array<engine-command> | 是 | 已通过校验并补齐可信控制字段的 Engine Command；没有时为空数组 |
+| router_requests | array<router-request> | 是 | 要交给 Router 的请求；没有时为空数组 |
+| user_response | object \| null | 是 | 需要向用户澄清时包含 `code` 和 `message`，其他状态为 `null` |
+| user_response.code | string | user_response 非 null 时 | 稳定、机器可读的澄清原因 |
+| user_response.message | string | user_response 非 null 时 | 可以直接展示或由渠道安全改写的非空澄清问题 |
+
+状态与内容必须一致：`commands_ready` 的 commands 非空；`routing_required` 的 router_requests 非空；`commands_and_routing_ready` 两个数组都非空；`clarification_required` 的 `user_response` 非 null。按照第 14.4 节，`clarification_required` 仍可携带与歧义完全独立的 commands 或 router_requests；调用方只提交这些已通过独立性校验的结果，并继续向用户澄清其余部分。
 
 ### 18.1 commands_ready
 

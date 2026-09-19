@@ -31,6 +31,23 @@
 
 其他规范提供字段来源和静态定义的完整约束；本文会直接说明外部组件发送和接收每个字段时需要知道的行为。
 
+### 0.1 字段表中的类型记法
+
+| 记法 | 含义 |
+|---|---|
+| string、integer、number、boolean、object、array、null | 对应同名 JSON 类型；integer 是没有小数部分的 number |
+| enum | 封闭枚举；允许值必须在同一字段行或紧随其后的表中列出 |
+| array<T> | 元素都符合 T 的 JSON 数组 |
+| object<K, V> | key 符合 K、value 符合 V 的 JSON 对象 |
+| A \| B | 值可以是 A 或 B 两种类型之一 |
+| datetime | 带时区偏移的 RFC 3339 日期时间字符串 |
+| duration | 正的 ISO 8601 时长字符串，例如 `PT10S` |
+| slot-ref、data-ref | 分别是 `slots.<id>`，以及 Slot 或 Artifact 的完整引用 |
+| command-type、emission-type | 本协议定义的封闭类型集合；允许值在对应公共信封后列出 |
+| any | 具体 JSON 类型由 Workflow Definition 或工具、事件合同决定，不表示无需校验 |
+
+“必填”列给出字段必须出现的条件。未明确允许的未知字段必须拒绝。
+
 ## 1. 范围与原则
 
 ### 1.1 协议目标
@@ -209,14 +226,16 @@ new_state、decision 和 emissions 必须在同一个逻辑事务中提交。
 | occurred_at | datetime | 是 | 该操作在来源系统实际发生的时间；它用于审计，不代表 Engine 的提交时间 |
 | payload | object | 是 | 与 `type` 对应的专属参数；不同 Command 类型使用不同字段 |
 
+本版本的 `command-type` 是封闭集合：`workflow.start`、`workflow.cancel`、`interaction.answer`、`interaction.cancel`、`slot.change`、`tool.result`、`timer.fired`、`external.event`、`subworkflow.result`。未知类型必须拒绝；扩展 Command 需要新的协议版本或明确的扩展命名空间。
+
 ### 4.3 actor
 
-| 字段 | 必填 | 含义 |
-|---|---:|---|
-| type | 是 | 主体类别：用户、系统、工具、定时器、事件来源、子 Workflow 或人工操作员 |
-| id | 是 | 该主体在其类别中的已认证稳定 ID；不能从用户文本或模型输出中直接取得 |
-| tenant_id | 多租户时 | 主体和目标实例所属的租户隔离范围；两者不一致时必须拒绝 |
-| roles | 否 | 认证系统已经确认的角色摘要；Engine 仍需结合 Command 和 Workflow Policy 做授权 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| type | enum | 是 | 只允许 `user`、`system`、`tool`、`timer`、`event_source`、`workflow` 或 `operator` |
+| id | string | 是 | 该主体在其类别中的已认证稳定 ID；不能从用户文本或模型输出中直接取得 |
+| tenant_id | string | 多租户时 | 主体和目标实例所属的租户隔离范围；两者不一致时必须拒绝 |
+| roles | array<string> | 否 | 认证系统已经确认的角色；不得重复，Engine 仍需结合 Command 和 Workflow Policy 授权 |
 
 actor 不得携带访问令牌、密码或工具凭证。
 
@@ -224,11 +243,11 @@ Command 的实际发送组件身份必须来自经过认证的传输上下文，
 
 ### 4.4 trace
 
-| 字段 | 含义 |
-|---|---|
-| correlation_id | 把同一会话或业务请求产生的多个 Command 和 Emission 归入一条观测链 |
-| causation_id | 直接导致本 Command 的用户消息、Emission 或外部事件 ID，用于追溯因果关系 |
-| trace_id | 跨服务传播的分布式追踪 ID，用于性能和故障排查 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| correlation_id | string | 否 | 把同一会话或业务请求产生的多个 Command 和 Emission 归入一条观测链 |
+| causation_id | string | 否 | 直接导致本 Command 的用户消息、Emission 或外部事件 ID |
+| trace_id | string | 否 | 符合部署环境追踪格式的分布式追踪 ID |
 
 trace 不参与 Workflow 业务判断。
 
@@ -279,13 +298,14 @@ tool.result、timer.fired、external.event 和 subworkflow.result MAY 省略 exp
 }
 ~~~
 
-| payload 字段 | 必填 | 含义 |
-|---|---:|---|
-| workflow.id | 是 | 要启动的流程模板 ID，例如 `flight_booking` |
-| workflow.version | 是 | 要固定使用的准确 Definition 版本；实例启动后不能自动漂移到新版本 |
-| start_key | 是 | 由业务调用方生成的启动幂等键；重复提交同一业务请求时，Engine 返回原实例而不是再创建一个 |
-| initial_slots | 否 | 创建实例时已经确定的 Slot 初始值，例如出发地；每个值仍需通过 Slot 类型、来源和权限校验 |
-| parent | 子 Workflow 时 | 父实例 ID、发起调用的节点和 call ID，用于把子流程结果安全返回给唯一的父调用 |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| workflow | object | 是 | 要启动且已经发布的 Definition 准确引用 |
+| workflow.id | string | 是 | 流程模板的稳定 ID，例如 `flight_booking` |
+| workflow.version | exact semver | 是 | 准确版本；不能使用 `latest` 或版本范围，实例启动后不能自动漂移 |
+| start_key | string | 是 | 调用方生成的非空启动幂等键；同一租户内重复使用时返回原实例 |
+| initial_slots | object<slot-name, any> | 否 | 已确定的 Slot 初始规范值；字段必须存在于 Definition，并通过类型、source 和权限校验 |
+| parent | object \| null | 是 | 顶层实例为 `null`；子实例包含父实例 ID、发起节点 ID 和 call ID |
 
 Engine 必须验证 initial_slots 的类型、source 和权限。调用方不得传入 Artifact、active node 或 revision。
 
@@ -313,10 +333,10 @@ Engine 必须验证 initial_slots 的类型、source 和权限。调用方不得
 }
 ~~~
 
-| payload 字段 | 必填 | 含义 |
-|---|---:|---|
-| reason | 是 | 稳定、机器可读的取消原因，例如 `duplicate_case`；用于 Policy、审计和后续解释，不使用自由文本控制流程 |
-| mode | 是 | 取消方式；0.2 版本只允许 `graceful`，表示先按 Definition 处理已提交副作用和必要补偿再终止 |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| reason | string | 是 | 非空、稳定的机器取消原因，例如 `duplicate_case`；不使用自由文本控制流程 |
+| mode | enum | 是 | 0.2 版本只允许 `graceful` |
 
 graceful cancel 必须遵守 Workflow 中的副作用和补偿规则。协议不提供跳过补偿、删除审计记录或强制改写终态的能力。
 
@@ -348,10 +368,10 @@ graceful cancel 必须遵守 Workflow 中的副作用和补偿规则。协议不
 }
 ~~~
 
-| payload 字段 | 必填 | 含义 |
-|---|---:|---|
-| interaction_id | 是 | Engine 发起本次问题时生成的唯一 ID；它必须仍对应当前未关闭的问题 |
-| answers | 是 | 本次问题允许填写的 Slot 完整引用及其规范值；不能包含该问题未请求的字段 |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| interaction_id | string | 是 | Engine 发起本次问题时生成的唯一 ID；必须仍对应当前未关闭的问题 |
+| answers | object<slot-ref, any> | 是 | 至少一项；key 必须属于该问题的 `request.fields`，value 必须通过对应 Slot 类型和选项校验 |
 
 Engine 必须验证：
 
@@ -388,6 +408,13 @@ Engine 必须验证：
 
 interaction.cancel 只处理当前交互。取消整个实例使用 workflow.cancel。
 
+payload 字段：
+
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| interaction_id | string | 是 | 要关闭的当前活动问题 ID；已回答、撤销或被替代的 ID 必须拒绝 |
+| reason | string | 是 | 稳定的机器原因；用户主动放弃使用 `user_cancelled` |
+
 ## 7. Slot 修改 Command
 
 ### 7.1 slot.change
@@ -423,11 +450,11 @@ slot.change 在实例尚未终止时修改一个或多个既有 Slot。它不表
 }
 ~~~
 
-| payload 字段 | 必填 | 含义 |
-|---|---:|---|
-| changes | 是 | 要修改的 Slot 完整引用及其新规范值，至少一项；所有修改作为同一事务处理 |
-| expected_slot_revisions | 是 | 调用方读取每个待修改 Slot 时看到的版本；任一版本已变化时，整个修改以 conflict 拒绝 |
-| reason | 是 | 机器可读的稳定修改原因，例如 `user_correction`，用于 Policy 判断和审计 |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| changes | object<slot-ref, any> | 是 | 至少一项；key 必须是允许修改的既有 Slot，value 必须通过对应类型和约束；整体原子提交 |
+| expected_slot_revisions | object<slot-ref, integer> | 是 | key 集合必须与 `changes` 完全相同；每个非负整数是调用方读取该 Slot 时看到的 revision |
+| reason | string | 是 | 非空、稳定的机器修改原因，例如 `user_correction`，用于 Policy 判断和审计 |
 
 Engine 必须将同一个 slot.change 中的所有 changes 作为原子集合处理。任一修改不合法时，整个 Command 被拒绝。
 
@@ -490,13 +517,13 @@ Tool Executor 使用 tool.result 返回 tool.requested 的执行结果。
 }
 ~~~
 
-| payload 字段 | 必填 | 含义 |
-|---|---:|---|
-| invocation_id | 是 | Engine 请求本次工具调用时生成的唯一 ID；结果只能写回这次仍然有效的调用 |
-| attempt | 是 | 本结果对应第几次执行尝试，用于拒绝被较新重试替代的迟到结果 |
-| status | 是 | 工具合同预先声明的结果类别，例如 `success`、`no_result` 或 `technical_error` |
-| result | 成功或业务状态需要数据时 | 经过工具合同校验的结构化返回数据；Engine 按当前 action 的 result 映射写入输出 |
-| error | 技术失败时 | 经过标准化且不含凭证和内部堆栈的错误信息 |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| invocation_id | string | 是 | Engine 生成的工具调用 ID；结果只能写回这次仍有效的调用 |
+| attempt | integer | 是 | 对应的执行尝试序号，从 1 开始；必须等于当前等待的 attempt |
+| status | string | 是 | 必须属于原 `tool.requested.allowed_statuses` |
+| result | object \| null | 合同规定该 status 返回数据时 | 通过工具合同校验的数据；Engine 按 action.result 映射写入输出 |
+| error | error \| null | 是 | 技术失败时为标准 Error；其他状态必须为 `null`，不得含凭证或内部堆栈 |
 
 Engine 必须验证 invocation_id、tool identity、attempt、等待状态和结果 schema。已撤销或被重算替代的 invocation 返回 STALE_INVOCATION，不能写入 Artifact。
 
@@ -526,10 +553,10 @@ Tool Executor 不得提交 transition、Artifact 名称或下一节点。
 }
 ~~~
 
-| payload 字段 | 必填 | 含义 |
-|---|---:|---|
-| timer_id | 是 | Engine 创建定时任务时生成的唯一 ID；只能触发仍处于活动状态的对应等待 |
-| scheduled_for | 是 | Timer Service 原计划触发该任务的时刻，用于审计延迟和拒绝错误任务，不由它决定流程跳转 |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| timer_id | string | 是 | Engine 创建的唯一 Timer ID；只能触发仍处于活动状态的对应等待 |
+| scheduled_for | datetime | 是 | RFC 3339 计划触发时刻；必须与原 `timer.requested.due_at` 一致 |
 
 Timer Service 不得决定 timeout transition。Engine 根据 timer_id 对应的节点和 Definition 选择路径。
 
@@ -560,12 +587,12 @@ Timer Service 不得决定 timeout transition。Engine 根据 timer_id 对应的
 }
 ~~~
 
-| payload 字段 | 必填 | 含义 |
-|---|---:|---|
-| event_id | 是 | 来源系统为该逻辑事件分配的唯一幂等 ID；重复投递不能重复恢复流程 |
-| event_type | 是 | 事件合同中的稳定类型，例如 `refund.manual_review_completed` |
-| correlation_key | 是 | Engine 进入 wait 时生成或计算的关联值，用于确认事件属于哪个实例和哪一次等待 |
-| data | 是 | 事件携带的业务数据；必须符合 wait 节点声明的结构后才能写入 Slot 或 Artifact |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| event_id | string | 是 | 来源系统分配的唯一幂等 ID；重复投递不能重复恢复流程 |
+| event_type | string | 是 | 必须等于当前 wait 节点声明的 `event.type` |
+| correlation_key | string | 是 | 必须等于当前 wait 实例化后保存的关联值 |
+| data | object | 是 | 必须符合外部事件合同和 wait.result 映射要求，未声明字段不得写入 State |
 
 来源签名验证应在 Event Adapter 完成，Engine 仍须验证 actor、event_type、correlation_key 和 payload schema。
 
@@ -595,12 +622,12 @@ Timer Service 不得决定 timeout transition。Engine 根据 timer_id 对应的
 }
 ~~~
 
-| payload 字段 | 必填 | 含义 |
-|---|---:|---|
-| call_id | 是 | 父 Engine 发起这次子流程调用时生成的唯一 ID，用于关联和幂等处理结果 |
-| child_instance_id | 是 | 实际完成的子 Workflow Instance ID，必须与 call_id 当前绑定的实例一致 |
-| outcome | 是 | 子流程终止时返回的稳定结果类别，必须属于父 call 节点声明的 `on` 分支 |
-| result | outcome 提供公开结果时 | 子流程通过公开结果合同返回的数据；父流程只能读取 `map_outputs` 明确映射的字段 |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| call_id | string | 是 | 父 Engine 生成的唯一调用 ID，用于关联和幂等处理结果 |
+| child_instance_id | string | 是 | 必须等于当前 call_id 绑定的子 Workflow Instance ID |
+| outcome | string | 是 | 必须属于父 call 节点 `on` 中已声明的结果类别 |
+| result | object | outcome 的公开结果合同要求时 | 子流程公开结果；key 只能来自父节点 `map_outputs` 的源字段 |
 
 父 Engine 只能读取 call node 的 map_outputs 声明的字段。子 Workflow 的内部 Slots、Artifacts 和节点状态不得泄露给父流程。
 
@@ -624,19 +651,19 @@ Timer Service 不得决定 timeout transition。Engine 根据 timer_id 对应的
 }
 ~~~
 
-| 字段 | 必填 | 含义 |
-|---|---:|---|
-| protocol_version | 是 | 本 Decision 使用的 Engine 协议版本 |
-| command_id | 是 | 本 Decision 正在回答的 Command ID；调用方用它关联请求与结果 |
-| status | 是 | Engine 对 Command 的处理结论：已接受、拒绝、版本冲突、重复提交或内部失败 |
-| workflow_instance_id | 启动成功后或操作既有实例时 | 本次处理涉及的实例 ID；`workflow.start` 成功后由 Engine 首次返回 |
-| previous_instance_revision | 处理既有实例时 | Engine 开始处理前的实例版本；未修改状态时通常与当前版本相同 |
-| current_instance_revision | 有实例时 | 本次处理完成后的实例版本；调用方后续提交修改时以此作为期望版本 |
-| execution_status | 有实例时 | 实例处理完本 Command 后处于运行、等待、完成、取消还是失败状态 |
-| outcome | 实例终止时 | 终止节点声明的机器可读结果，例如 `completed` 或 `no_result` |
-| change_summary | `slot.change` 被接受时可选 | 哪些数据被修改、失效以及 Engine 将从哪里重新计算的只读摘要 |
-| emissions | 是 | Engine 与状态变化原子产生的输出列表；调用方按每个 Emission 的类型分发给对应消费者 |
-| error | status 不是 accepted 或 duplicate 时 | 稳定错误码、类别、可重试性和安全过滤后的细节 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| protocol_version | string | 是 | 本 Decision 使用的 Engine 协议版本 |
+| command_id | string | 是 | 必须等于被处理 Command 的 ID |
+| status | enum | 是 | 只允许 `accepted`、`rejected`、`conflict`、`duplicate` 或 `failed` |
+| workflow_instance_id | string | 启动成功后或操作既有实例时 | 本次处理涉及的实例 ID |
+| previous_instance_revision | integer | 处理既有实例时 | 处理前的非负实例版本；未修改状态时通常与当前版本相同 |
+| current_instance_revision | integer | 有实例时 | 处理后的非负实例版本，供后续 Command 做并发校验 |
+| execution_status | enum | 有实例时 | 只允许 `running`、`waiting`、`completed`、`cancelled` 或 `failed` |
+| outcome | string \| null | 是 | 未终止时为 `null`；终止时为 end 节点声明的稳定结果 |
+| change_summary | object \| null | 是 | `slot.change` 被接受时可提供修改、失效和重算摘要，其他情况为 `null` |
+| emissions | array<emission> | 是 | 与状态变化原子产生的输出；没有时为空数组 |
+| error | error \| null | 是 | `rejected`、`conflict`、`failed` 时为 Error；`accepted`、`duplicate` 时为 `null` |
 
 ### 10.2 status
 
@@ -684,17 +711,19 @@ accepted 不代表业务成功，只代表 Command 已被 Engine 接受并确定
 
 ### 11.2 公共字段
 
-| 字段 | 必填 | 含义 |
-|---|---:|---|
-| protocol_version | 是 | 本 Emission 使用的 Engine 协议版本 |
-| emission_id | 是 | Engine 为该逻辑输出分配的全局唯一幂等 ID；重复投递时保持不变 |
-| type | 是 | 输出种类，例如询问用户、请求工具调用或报告流程完成；它决定 `payload` 的结构和消费者 |
-| workflow_instance_id | 是 | 产生该输出的流程实例 ID |
-| instance_revision | 是 | 该输出与哪个已提交实例版本绑定；消费者可据此识别过期上下文 |
-| sequence | 是 | 同一实例内从小到大递增的输出序号，用于发现遗漏或乱序，不用于跨实例排序 |
-| caused_by_command_id | 是 | 直接触发这批状态变化和输出的 Command ID |
-| created_at | 是 | Engine 将状态和该 Emission 一起提交成功的时间 |
-| payload | 是 | 与 `type` 对应的专属内容 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| protocol_version | string | 是 | 本 Emission 使用的 Engine 协议版本 |
+| emission_id | string | 是 | Engine 分配的全局唯一幂等 ID；重复投递时保持不变 |
+| type | emission-type | 是 | 输出种类；决定 payload 结构和消费者 |
+| workflow_instance_id | string | 是 | 产生该输出的流程实例 ID |
+| instance_revision | integer | 是 | 该输出绑定的已提交非负实例版本 |
+| sequence | integer | 是 | 同一实例内从 1 开始严格递增的输出序号，不用于跨实例排序 |
+| caused_by_command_id | string | 是 | 直接触发本次状态变化的 Command ID |
+| created_at | datetime | 是 | Engine 原子提交 State 和 Emission 的 RFC 3339 时间 |
+| payload | object | 是 | 与 `type` 对应的专属内容；未知字段必须按对应 Emission Schema 拒绝 |
+
+本版本的 `emission-type` 是封闭集合：`interaction.requested`、`response.produced`、`tool.requested`、`timer.requested`、`timer.cancelled`、`subworkflow.requested`、`workflow.waiting`、`workflow.completed`、`workflow.failed`、`workflow.cancelled`、`human_action.requested`、`state.invalidated`。未知类型必须拒绝。
 
 消费者必须按 emission_id 幂等处理。sequence 用于检测实例内遗漏和乱序，不用于跨实例排序。
 
@@ -735,16 +764,20 @@ accepted 不代表业务成功，只代表 Command 已被 Engine 接受并确定
 }
 ~~~
 
-| payload 字段 | 含义 |
-|---|---|
-| interaction_id | 这一次具体提问的唯一 ID；用户回答和取消必须引用它，同一 ask 重新执行时生成新值 |
-| node_id | 产生这次提问的节点 ID，供审计和界面关联使用；回答 Command 不需要重复提交它 |
-| request | 已用当前有效数据解析完成、可以直接交给 Harness 展示和理解的提问内容 |
-| request.kind | 提问形式：一次填写多个字段、从列表选择、确认是非或自由文本 |
-| request.prompt | 应向用户表达的问题文字；Harness 可以做渠道适配，但不能改变业务含义 |
-| request.fields | 本次回答唯一允许写入的 Slot 列表；回答其他字段必须拒绝 |
-| request.options | 列表选择时当前仍有效的选项；每项的 `value` 是提交值，`label` 是展示文字 |
-| accepted_commands | Engine 在这个等待状态允许接收的 Command 类型；它是调用方能力提示，Engine 收到 Command 后仍会重新校验 |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| interaction_id | string | 是 | 本次提问的唯一 ID；同一 ask 重新执行时必须生成新值 |
+| node_id | string | 是 | 产生提问的 ask 节点 ID，只供审计和界面关联 |
+| request | object | 是 | 已使用当前有效数据解析完成的提问 |
+| request.kind | enum | 是 | 只允许 `form`、`selection`、`confirmation`、`text` |
+| request.prompt | string | 是 | 应向用户表达的非空问题文字 |
+| request.fields | array<slot-ref> | 是 | 至少一项且不得重复；是本次回答唯一允许写入的 Slot |
+| request.options | array<option> | 是 | `selection` 时至少一项，其他 kind 时为空数组 |
+| request.options[].value | 与目标 Slot 相同 | 每个 option 必填 | Engine 接受的规范提交值；同一选项数组中不得重复 |
+| request.options[].label | string | 每个 option 必填 | 给用户展示的非空文本 |
+| accepted_commands | array<command-type> | 是 | 当前等待状态允许的 Command 类型提示；至少包含 `interaction.answer`，不得重复 |
+
+`request.kind` 的 `fields`、`options` 和 Slot 类型组合约束与 Harness Interpretation Protocol 的 `pending_interaction.kind` 相同：`form` 可有多个字段；`selection` 恰好一个字段且选项非空；`confirmation` 恰好一个 boolean Slot；`text` 恰好一个字段。Harness 复制该语义视图时不得放宽这些约束。
 
 Harness 可以调整渠道展示形式，但不得改变 fields、options.value、accepted_commands 或业务含义。
 
@@ -778,12 +811,12 @@ Harness 可以调整渠道展示形式，但不得改变 fields、options.value�
 }
 ~~~
 
-| payload 字段 | 含义 |
-|---|---|
-| node_id | 产生该响应的 respond 节点 ID，用于审计和定位文案来源 |
-| code | 不随语言变化的稳定响应类别，UI 和调用方可据此选择展示方式 |
-| message | 按当前语言生成的默认展示文字；Harness 可以本地化，但不能改变 `code` 表达的业务结果 |
-| data | 与响应相关的结构化展示数据，例如报价或订单摘要；不是可供后续节点使用的新 Artifact |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| node_id | string | 是 | 产生响应的 respond 节点 ID |
+| code | string | 是 | 非空、稳定且不随语言变化的响应类别 |
+| message | string | 是 | 按当前语言生成的默认展示文字；可以为空字符串但字段不能省略 |
+| data | object | 是 | 结构化展示数据；没有数据时为空对象，不会自动成为 Artifact |
 
 Harness 可以本地化 message，但不得把失败结果改写为成功，也不得修改 code 和 data 的业务含义。
 
@@ -824,16 +857,16 @@ Harness 可以本地化 message，但不得把失败结果改写为成功，也�
 }
 ~~~
 
-| payload 字段 | 含义 |
-|---|---|
-| invocation_id | Engine 为本次逻辑工具调用生成的唯一 ID；Tool Executor 返回结果时必须原样携带 |
-| node_id | 发起调用的 action 节点 ID，便于审计；Tool Executor 不能用它指定跳转 |
-| tool | 要调用的已注册工具及其准确合同版本，例如 `flight.search@2` |
-| arguments | Engine 根据当前有效 Slot 和 Artifact 渲染并完成类型校验的最终参数；Executor 不得改写 |
-| attempt | 当前是第几次执行尝试，从 1 开始；由 Engine 的 retry 规则控制 |
-| timeout | 本次尝试允许执行的最长时间，Executor 超时后返回技术失败 |
-| idempotency_key | 对外产生副作用时使用的稳定去重键；无副作用的工具可以为 `null` |
-| allowed_statuses | Tool Executor 唯一允许返回的状态集合；返回集合之外的值属于合同错误 |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| invocation_id | string | 是 | Engine 为本次逻辑工具调用生成的唯一 ID；返回结果时必须原样携带 |
+| node_id | string | 是 | 发起调用的 action 节点 ID，只供审计 |
+| tool | tool-ref | 是 | 已注册工具及准确合同版本，例如 `flight.search@2` |
+| arguments | object | 是 | Engine 渲染并通过类型校验的最终参数；Executor 不得改写 |
+| attempt | integer | 是 | 从 1 开始的尝试序号，由 Engine retry 规则控制 |
+| timeout | duration | 是 | ISO 8601 时长且必须大于 0 |
+| idempotency_key | string \| null | 是 | 副作用调用必须是非空稳定键；无副作用工具为 `null` |
+| allowed_statuses | array<string> | 是 | 工具合同允许返回的非空状态集合；至少一项且不得重复 |
 
 Tool Executor 不得修改 arguments。需要重试时，由 Engine 根据 retry 规则产生新的 tool.requested；Tool Executor 的网络层瞬时重试不得突破 timeout 和幂等边界。
 
@@ -858,12 +891,12 @@ Tool Executor 不得修改 arguments。需要重试时，由 Engine 根据 retry
 }
 ~~~
 
-| payload 字段 | 含义 |
-|---|---|
-| timer_id | 本次定时任务的唯一 ID；Timer Service 触发和撤销时都使用它保证幂等 |
-| purpose | 定时器用途的稳定类别，例如节点超时或业务截止时间 |
-| due_at | 应触发的绝对时间；Timer Service 到时提交 `timer.fired`，不能自行决定后继节点 |
-| node_id | 创建定时器的节点 ID，用于审计；实际有效性由 Engine 中的活动等待判断 |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| timer_id | string | 是 | 本次定时任务的唯一 ID；触发和撤销时均原样携带 |
+| purpose | string | 是 | 稳定的定时器用途，例如 `node_timeout` |
+| due_at | datetime | 是 | RFC 3339 绝对触发时间 |
+| node_id | string | 是 | 创建定时器的节点 ID，只供审计；有效性由活动等待判断 |
 
 ### 13.3 timer.cancelled
 
@@ -895,12 +928,14 @@ Tool Executor 不得修改 arguments。需要重试时，由 Engine 根据 retry
 }
 ~~~
 
-| payload 字段 | 含义 |
-|---|---|
-| call_id | 这次父子流程调用的唯一 ID；Subworkflow Runner 用它防止重复创建子实例 |
-| node_id | 发起调用的父流程 call 节点 ID |
-| workflow | 要启动的子 Workflow Definition ID 和准确版本 |
-| slots | 已按 call 节点 `map_inputs` 生成并完成类型检查的子流程初始 Slot |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| call_id | string | 是 | 父子流程调用的唯一 ID，也是创建子实例的幂等键 |
+| node_id | string | 是 | 发起调用的父流程 call 节点 ID |
+| workflow | object | 是 | 子 Workflow Definition 的准确引用 |
+| workflow.id | string | 是 | 子流程的稳定 Definition ID |
+| workflow.version | exact semver | 是 | 已发布的准确版本，不能是范围或 `latest` |
+| slots | object<slot-name, any> | 是 | 按 `map_inputs` 生成并完成类型检查的初始 Slot；没有输入时为空对象 |
 
 Subworkflow Runner 必须使用 call_id 作为父子调用幂等键。
 
@@ -971,12 +1006,14 @@ Subworkflow Runner 必须使用 call_id 作为父子调用幂等键。
 }
 ~~~
 
-| payload 字段 | 含义 |
-|---|---|
-| cause | 引发本次失效传播的已验证事件类型和直接数据引用，例如出发日期被修改 |
-| stale | 因上游值或有效期变化而需要重新计算的数据引用；旧值可保留审计但不能继续读取 |
-| invalid | 被业务或安全规则明确撤销的数据引用，例如基于旧报价做出的确认 |
-| policies | 本次传播过程中实际命中的 Policy ID 及效果摘要 |
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| cause | object | 是 | 引发传播的已验证事件 |
+| cause.type | string | 是 | 稳定事件类型，例如 `slot.changed` |
+| cause.refs | array<data-ref> | 是 | 直接改变的引用；至少一项且不得重复 |
+| stale | array<data-ref> | 是 | 需要重新计算的数据引用；没有时为空数组，不得与 `invalid` 重复 |
+| invalid | array<data-ref> | 是 | 被业务或安全规则撤销的数据引用；没有时为空数组 |
+| policies | array<string> | 是 | 本次实际命中的 Policy ID；没有时为空数组，顺序为应用顺序 |
 
 state.invalidated 用于审计和调试。消费者不得通过它直接修改 Engine State。
 
@@ -1047,13 +1084,13 @@ Emissions / Outbox
 }
 ~~~
 
-| 字段 | 含义 |
-|---|---|
-| code | 稳定机器错误码 |
-| category | validation、authorization、conflict、state、contract、internal |
-| message | 不含敏感数据的可读说明 |
-| retryable | 使用新条件重试是否可能成功 |
-| details | 经过安全过滤的结构化上下文 |
+| 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| code | string | 是 | 本协议或实现注册的稳定机器错误码 |
+| category | enum | 是 | 只允许 `validation`、`authorization`、`conflict`、`state`、`contract` 或 `internal` |
+| message | string | 是 | 不含敏感数据、凭证和内部堆栈的可读说明 |
+| retryable | boolean | 是 | 在输入或外部条件更新后重试是否可能成功；不表示调用方必须自动重试 |
+| details | object | 是 | 安全过滤后的结构化上下文；没有可公开细节时为空对象 |
 
 ### 17.2 标准错误码
 
