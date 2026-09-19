@@ -7,6 +7,8 @@
 
 本文依赖 [Workflow Definition 规范](./workflow-definition-spec.md) 中的 Workflow、Slot、Artifact、Node、Policy、revision 和失效语义。
 
+自然语言如何被理解并编译为 Engine Command，见 [Harness Interpretation 协议](./harness-interpretation-protocol.md)。
+
 ---
 
 ## 1. 范围与原则
