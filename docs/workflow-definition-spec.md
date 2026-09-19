@@ -1,5 +1,16 @@
 # Workflow JSON 定义规范
 
+## 0. 规范结构
+
+本文按四层定义 workflow：
+
+1. **定义层**：workflow、slots、artifacts、nodes、policies，描述可执行规则。
+2. **运行层**：State、当前节点、slot 值、artifact 值和 revision，描述单个案件的实时状态。
+3. **理解层**：Harness/Agent 把用户消息转换为回答、确认、取消或 slot_changes。
+4. **执行层**：Engine 校验、调用工具、写入结果、传播失效并推进节点。
+
+阅读一个字段时，先问它属于哪一层。比如 slots.departure_date.type 是定义层；state.slots.departure_date 是运行层；用户说“改成明天”产生的 slot_changes 是理解层。
+
 本文定义面向未来的 workflow JSON 规范。它和 [`schemas/workflow.schema.json`](../schemas/workflow.schema.json) 的关系是：Schema 负责判断 JSON 结构是否合法；本文说明字段在流程引擎中如何解释、什么时候生效、由谁写入，以及失败时发生什么。当前仓库中的 loader 和 engine 是原型实现，尚未覆盖本文所有目标字段；新增字段必须同步更新 Schema、loader、引擎和测试。
 
 ## 1. Workflow 是什么
@@ -75,6 +86,49 @@ Schema 的 `additionalProperties: false` 表示顶层不能随便增加字段。
 | `policies` | 不能从普通数据依赖推导出的业务、安全和风控失效规则。 |
 
 这些字段属于目标规范。原型阶段可以继续使用 `mutable_inputs`，但迁移后的正式定义应将它映射到 `slots` 和 `policies`。
+
+### 2.1 顶层字段和运行时字段的对应关系
+
+| 静态定义字段 | 动态 State 字段 | 关系 |
+|---|---|---|
+| slots.departure_date.type | state.slots.departure_date | 前者定义允许什么值，后者保存本案件当前值。 |
+| artifacts.flight_search.producer | state.artifacts.flight_search.value | 前者定义谁能产生结果，后者保存实际结果。 |
+| nodes | state.current_node | 前者定义全部节点，后者保存当前案件所在节点。 |
+| version | workflow_version | State 固定引用启动时的定义版本。 |
+| policies.departure_date | events 中的失效记录 | 前者定义规则，后者记录本次实际执行。 |
+
+### 2.2 slots 的完整语义
+
+slots 不是“模型抽取到的所有信息”，而是 workflow 允许接受的输入契约。每个 slot 都要回答：它是什么类型、谁能写、是否必填、是否能修改、修改后从哪里重算。
+
+~~~json
+{
+  "slots": {
+    "cabin": {
+      "type": "enum",
+      "values": ["economy", "business", "first"],
+      "required": true,
+      "owner": "user",
+      "mutable": true,
+      "change_policy": {
+        "restart_at": "search_flights",
+        "priority": 20,
+        "invalidates": ["flight_search", "selected_flight", "cabin_quote"]
+      }
+    }
+  }
+}
+~~~
+
+字段含义：
+
+- slot 名称是稳定的程序字段名，不是问题文本。
+- type 决定解析后的值能否写入；自然语言“明天”必须先解析成案件时区下的绝对日期。
+- owner 决定写入权限。user slot 可以由用户更正，tool artifact 不能被模型伪造。
+- required 只表示流程门槛，不代表一开始就必须询问；引擎可以在真正需要它的节点前再询问。
+- mutable=false 时，用户后续说“改一下”必须进入澄清或人工处理，不能静默覆盖。
+- change_policy 决定已有值被修改后的回退入口和额外清理范围。
+- 用户本轮消息解析出的 slot_changes 是临时 patch，只有通过这些校验后才合并进动态 State。
 
 ## 3. 通用节点字段
 
@@ -204,7 +258,9 @@ Schema 的 `additionalProperties: false` 表示顶层不能随便增加字段。
 
 `end` 没有业务字段。引擎到达它时把案件状态设置为 `completed`。它只表示 workflow 结束，不表示退款一定成功；成功与否必须由前面的结果节点说明。
 
-## 5. `mutable_inputs`：处理用户后续修改
+## 5. 用户修改和事实失效
+
+目标规范使用 slots 中的 change_policy、节点 inputs/outputs 和 policies 计算失效范围。当前原型的 mutable_inputs 是兼容写法，表示相同的用户修改入口，但要求 workflow 作者手工维护 invalidates 清单。
 
 用户在确认前修改出发日期、金额、渠道或账号，是正常流程行为。不能直接覆盖一个字段后继续，因为搜索结果、报价和确认可能都是旧输入产生的。
 
@@ -397,6 +453,31 @@ Harness 负责把“改成明天”解析为结构化 patch：
 ```
 
 如果已经出票，不能继续使用这个“未确认预订”流程修改日期。应根据业务状态路由到独立的改签或退票 workflow。
+
+## 5.5 artifacts 的完整语义
+
+artifact 是执行结果，不是“暂时放在 slots 里的另一个输入字段”。它必须有生产者，并且记录产生时使用的输入版本。
+
+~~~json
+{
+  "artifacts": {
+    "flight_search": {
+      "producer": "search_flights",
+      "owner": "tool",
+      "value_schema": "FlightSearchResult",
+      "cacheable": true
+    },
+    "cabin_quote": {
+      "producer": "quote_flight",
+      "owner": "tool",
+      "value_schema": "CabinQuote",
+      "cacheable": false
+    }
+  }
+}
+~~~
+
+静态定义中的 artifacts 只描述契约；真实值放在 State.artifacts。用户修改上游 slot 后，旧 artifact 必须变为 invalid，不允许继续作为工具参数、分支条件或确认文案的来源。
 
 ## 6. 事实、来源与权限
 
