@@ -664,6 +664,12 @@ Intent Catalog 让模型把自然语言映射为稳定的 Business Intent ID。�
 
 `allowed_slots` 描述当前 Workflow 在当前运行阶段允许回答或修改的 Slot；`allowed_entities` 描述路由前为了识别业务目标可以提取的实体。两者即使使用相同名称，也不存在自动映射关系，必须由 Router 或 Workflow Definition 的可信映射明确建立。
 
+#### 为什么不直接删除 `allowed_entities`
+
+`allowed_entities` 不是一个 Registry，也不是第二套字段定义；它只是 Intent 级别的提取白名单。保留它的原因是：用户可能还没有选定或启动任何 Workflow，但系统已经需要从一句话中提取订单号、出发地或日期来决定路由和启动参数。此时不存在可以提供 `allowed_slots` 的活动 Workflow Instance。
+
+如果产品始终采用“先根据固定入口创建 Workflow，再在 Workflow 内理解用户消息”的模式，可以删除 `allowed_entities`，让所有字段都通过 `allowed_slots` 暴露。但这种模式不能自然处理一个入口同时支持退款、关闭自动续费、机票预订等多个业务目标，也会把尚未授权的预路由候选过早伪装成 Runtime Slot。本规范面向多能力路由，因此保留两个不同阶段的白名单，并让它们共同引用 Field Registry。
+
 ### 7.4 Field Registry 的最小合同
 
 Field Registry 是受信任的静态配置目录。Intent Catalog 和 Workflow Definition 都可以引用其中的字段 ID，不在自然语言描述里重新定义类型。每个被 `allowed_entities` 或 Workflow Slot 引用的字段至少应有：
