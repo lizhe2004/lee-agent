@@ -12,6 +12,25 @@
 
 ---
 
+## 0. 本文所需的最小术语
+
+阅读本文不要求先阅读另外两份规范。本文使用以下术语：
+
+| 术语 | 在本文中的含义 |
+|---|---|
+| Workflow Definition | 一套带版本的静态业务流程模板，例如“机票预订 1.0.0”；它定义步骤、数据和规则，不保存某位用户的处理进度 |
+| Workflow Instance | 某个用户或案件按照一个 Definition 运行出来的流程实例；它保存当前进度、用户已经提供的数据和工具结果 |
+| ask 节点 | Workflow 中暂停执行并等待用户回答的步骤，例如“请选择航班”或“是否确认购买” |
+| Slot | Workflow 中允许用户、调用方或可信事件提供和修改的业务变量，例如出发日期、手机号、订单号 |
+| Artifact | Workflow 或工具计算出的结果，例如航班列表、身份验证结果；用户不能通过自然语言直接写入 |
+| pending interaction | 当前正在等待用户处理的问题的语义描述，包含问题类型、提示文案、允许回答的字段和选项，不包含 Engine 内部控制 ID |
+| Engine Command | Harness 校验完成后提交给 Engine 的结构化操作，例如回答当前问题或修改出发日期 |
+| Engine Emission | Engine 产生的结构化输出，例如要求询问用户、调用工具或报告流程完成 |
+| Business Intent | 用户希望完成的业务目标，例如退款或关闭自动续费；它不表示应该新建还是继续某个 Workflow |
+| Intent Router | 根据业务意图、活动流程和系统能力决定继续、恢复或创建哪个 Workflow 的组件 |
+
+另外两份规范用于定义这些对象的完整执行规则；本文会在字段第一次出现时给出足以理解本协议的含义。
+
 ## 1. 协议目标与边界
 
 ### 1.1 目标
@@ -183,9 +202,9 @@ Interaction Act 描述用户对当前对话交互做了什么：
 
 | type | 含义 | 可能编译结果 |
 |---|---|---|
-| answer | 回答当前 ask | `interaction.answer` |
-| slot_change | 更正或修改允许用户修改的 Slot | `slot.change` |
-| cancel_interaction | 放弃当前 ask 交互 | `interaction.cancel` |
+| answer | 用户在回答 `pending_interaction` 中正在询问的字段，例如选择某个航班或确认购买 | Harness 校验后生成 `interaction.answer` Engine Command |
+| slot_change | 用户主动更正已经提供的业务变量，例如把出发日期从今天改成明天；它可以发生在确认等后续阶段 | Harness 校验后生成 `slot.change` Engine Command |
+| cancel_interaction | 用户表示不再回答当前这个问题，例如在选择列表时说“算了”；它只关闭当前问题，不等于取消订单或终止整个业务 | Harness 校验后生成 `interaction.cancel` Engine Command |
 
 Interaction Act 与当前 Workflow Instance 的交互上下文有关。
 
@@ -287,25 +306,25 @@ Ambiguity 表示某个值、指代、动作或意图存在多个合理解释，�
 
 | 字段 | 必填 | 含义 |
 |---|---:|---|
-| interpretation_version | 是 | Harness Interpretation 协议版本 |
-| utterance | 是 | 当前用户原始消息 |
-| locale | 是 | 语言、数字和展示习惯 |
-| timezone | 日期时间场景 | 相对日期时间解释使用的时区 |
-| reference_time | 日期时间场景 | “今天”“明天”等表达的唯一基准时间 |
-| conversation_context | 否 | 经过裁剪的历史对话和摘要 |
-| pending_interaction | 有活动 ask 时 | 当前 `interaction.requested` 的裁剪视图 |
-| allowed_interaction_acts | 是 | 本轮允许模型输出的 Interaction Act 类型 |
-| allowed_slots | 是 | 模型允许回答或修改的 Slot 白名单与类型摘要 |
-| intent_catalog | 是 | 模型可识别的稳定 Business Intent 目录，可为空 |
+| interpretation_version | 是 | 本次模型输入使用的结构版本；模型必须在结果中原样返回，Harness 用它选择对应的校验规则 |
+| utterance | 是 | 本轮刚收到的用户消息，包括消息 ID、原文、语言和接收时间；这是模型本轮需要解释的主要内容 |
+| locale | 是 | 用户使用的地区语言格式，例如 `zh-CN`；用于解释数字、日期写法和生成适合用户的澄清问题 |
+| timezone | 出现日期或时间时 | 解释“今天”“明天”“晚上八点”等表达所使用的时区，例如 `Asia/Shanghai` |
+| reference_time | 出现相对日期或时间时 | 相对时间计算的固定基准时刻；模型不得使用自身系统时间代替它 |
+| conversation_context | 需要历史语境时 | Harness 选择的历史摘要、最近消息和较早的相关消息，用于理解“那个”“还是原来的”等省略表达 |
+| pending_interaction | 系统正在等待用户回答时 | 当前问题的语义描述，包含问题类型、展示文本、可回答字段和可选项；没有待回答问题时省略，并且永远不包含 `interaction_id`、节点 ID 或 revision |
+| allowed_interaction_acts | 是 | 本轮允许模型识别的交互动作类型白名单，例如 `answer`、`slot_change`；模型不得输出名单之外的动作 |
+| allowed_slots | 是 | 本轮允许模型回答或修改的业务变量及其类型、当前值和可修改性；空对象表示本轮不能写任何 Slot |
+| intent_catalog | 是 | 本轮允许模型识别的业务目标目录，每项包含稳定 ID 和语义说明；空数组表示本轮不做业务意图分类 |
 
 ### 4.3 utterance
 
 | 字段 | 含义 |
 |---|---|
-| id | 当前消息稳定 ID |
-| text | 当前用户原文，不得用预处理后的改写文本替代 |
-| language | 已检测语言；未知时可为 `null` |
-| received_at | 渠道接收时间 |
+| id | 渠道为本条用户消息分配的稳定 ID；模型结果中的 `utterance_id` 必须与它相同 |
+| text | 用户实际发送的原文；Harness 可以另做分词或检索，但不得用改写文本替换这里的原文 |
+| language | Harness 检测到的消息语言，例如 `zh-CN`；无法可靠判断时为 `null` |
+| received_at | Harness 从渠道收到消息的时间，用于审计和消息排序，不代替 `reference_time` |
 
 `utterance` 是本轮理解的主要对象。历史消息用于消解省略、代词和上下文，不能覆盖当前消息中的明确表达。
 
@@ -354,11 +373,11 @@ Ambiguity 表示某个值、指代、动作或意图存在多个合理解释，�
 
 | 字段 | 含义 |
 |---|---|
-| summary | 较早对话的有损摘要 |
-| summary.text | 不包含执行权限的事实摘要 |
-| summary.through_message_id | 摘要覆盖到的最后一条消息 ID |
-| recent_turns | 按时间顺序排列的最近原始消息 |
-| relevant_turns | 从更早对话中检索出的相关原始片段 |
+| summary | 对较早对话的压缩文字；可能遗漏细节，只用于帮助理解语境，不能证明身份验证或业务操作已经完成 |
+| summary.text | 摘要正文，应描述已经讨论的对象和用户表达，不得伪造 Engine 状态或工具结果 |
+| summary.through_message_id | 摘要已经覆盖到的最后一条消息 ID；用于避免又把同一段历史重复放入 `recent_turns` |
+| recent_turns | 紧邻当前消息之前的若干条用户和客服原文，按时间从旧到新排列 |
+| relevant_turns | 从更早历史中检索出的少量相关原文，例如用户再次提到“上个月那笔订单”时检索到原订单描述 |
 
 每个 turn 包含稳定的 `message_id`、`role` 和经过必要脱敏的 `text`。
 
@@ -402,13 +421,14 @@ Harness 应：
 
 ### 6.1 pending_interaction
 
-`pending_interaction` 是 Harness 从 Engine 的 `interaction.requested` 构造的语义视图。它只包含模型理解当前用户消息需要的信息：
+`pending_interaction` 只在系统已经向用户提出问题并正在等待回答时出现。没有待回答问题时整个字段省略。
 
-- `kind`；
-- `prompt`；
-- `fields`；
-- `options[].value`；
-- 当前允许的交互行为。
+| 字段 | 含义 |
+|---|---|
+| kind | 用户应该用什么形式回答：填写表单、从列表选择、确认是非或输入自由文本 |
+| prompt | 当前向用户提出的问题文字，模型用它理解“确认”“第一个”等依赖问题内容的回答 |
+| fields | 本次回答允许填写的 Slot 完整引用；模型输出 `answer` 时只能引用这里列出的字段 |
+| options | 列表选择时当前仍有效的选项；每项包含提交用的稳定 `value` 和给用户看的 `label`，非选择题通常为空数组 |
 
 Harness 必须在自己的可信上下文中保存 `workflow_instance_id`、`interaction_id`、`node_id` 和 `expected_instance_revision`。这些控制字段不得放入 `pending_interaction`，模型也不得返回它们。
 
@@ -426,12 +446,12 @@ Workflow Definition 中 `request.accepts` 声明的是 Engine 交互事件。Har
 
 | 字段 | 含义 |
 |---|---|
-| type | Slot 数据类型 |
-| mutable | 用户当前是否允许修改 |
-| current_value | 理解本轮消息所需的当前值 |
-| values | enum 的允许值 |
-| sensitive | 是否需要掩码或禁止持久化 |
-| description | 业务含义，不能包含执行指令 |
+| type | 规范值的数据类型，例如 `date`、`boolean`、`enum`；模型候选值最终必须能通过该类型校验 |
+| mutable | 用户在当前流程阶段是否仍能修改该变量；为 `false` 时模型不得生成针对它的 `slot_change` |
+| current_value | Engine 当前保存的规范值，只在理解“改一下”“还是原来那个”等表达确实需要时提供 |
+| values | `enum` 类型允许使用的完整规范值集合；模型只能从中选择，不能自行创建新值 |
+| sensitive | 表示该变量是否包含手机号、证件号等敏感信息；Harness 据此决定掩码、日志和保留策略 |
+| description | 变量在业务中的直接含义，例如“乘客希望出发的日期”；不能在这里夹带流程跳转或工具调用指令 |
 
 敏感 Slot 的 `current_value` 应省略、掩码或只提供“是否存在”，除非理解当前消息确实需要该值。
 
@@ -462,11 +482,11 @@ Intent Catalog 让模型把自然语言映射为稳定的 Business Intent ID。�
 
 | 字段 | 必填 | 含义 |
 |---|---:|---|
-| id | 是 | 跨模型版本稳定的业务意图 ID |
-| description | 是 | 业务目标的语义定义 |
-| positive_examples | 否 | 典型正例，不能作为穷举规则 |
-| negative_examples | 否 | 容易混淆但不属于该意图的例子 |
-| allowed_entities | 否 | 允许随意图提取的预路由实体 |
+| id | 是 | 程序使用的稳定业务目标 ID，例如 `refund_request`；修改自然语言描述时不应更改这个 ID |
+| description | 是 | 该业务目标包含什么、不包含什么的直接说明，模型以它作为分类依据 |
+| positive_examples | 否 | 属于该意图的典型用户表达，用于帮助分类，不代表只有这些说法才能命中 |
+| negative_examples | 否 | 与该意图容易混淆但不属于它的表达，用于划清相邻意图边界 |
+| allowed_entities | 否 | 模型在识别该意图时可以一并提取的有限字段名称，例如订单引用；未列出的实体不得输出 |
 
 Intent Catalog 不应包含：
 
@@ -504,13 +524,13 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 
 | 字段 | 必填 | 含义 |
 |---|---:|---|
-| interpretation_version | 是 | 输出协议版本 |
-| utterance_id | 是 | 必须等于 Request 中的 `utterance.id` |
-| language | 是 | 模型实际理解使用的语言 |
-| interaction_acts | 是 | 当前交互相关的语义动作，可为空 |
-| business_intents | 是 | 从 Intent Catalog 识别出的业务目标，可为空 |
-| unmapped_requests | 是 | 无法映射到目录的用户请求，可为空 |
-| ambiguities | 是 | 无法确定的字段、指代、动作或意图 |
+| interpretation_version | 是 | 模型实际采用的结果结构版本，必须与输入版本相同 |
+| utterance_id | 是 | 本结果所解释的用户消息 ID，必须等于输入的 `utterance.id`，防止异步结果绑定到错误消息 |
+| language | 是 | 模型用来理解本条消息的语言；可用于发现输入语言检测错误 |
+| interaction_acts | 是 | 用户对当前待处理问题或已有 Slot 做出的动作，例如回答、修改或放弃当前问题；没有时为空数组 |
+| business_intents | 是 | 用户本轮明确提出并成功映射到 Intent Catalog 的业务目标；不包含“新建还是继续 Workflow”的判断 |
+| unmapped_requests | 是 | 用户明确提出但无法映射到本次 Intent Catalog 的请求摘要；它不代表系统最终不支持 |
+| ambiguities | 是 | 会影响结构化执行且无法唯一解释的值、指代、动作或意图；没有时为空数组 |
 
 未知顶层字段必须被 Harness 拒绝。模型名称、调用 ID、延迟和 token 用量由 Harness 从模型客户端取得并记录。
 
@@ -585,12 +605,12 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 | 字段 | 必填 | 含义 |
 |---|---:|---|
 | type | 是 | 固定为 `answer` |
-| answers | 是 | 至少一个回答项 |
-| answers[].ref | 是 | `pending_interaction.fields` 中的 Slot |
-| answers[].raw_value | 是 | 用户原始表达 |
-| answers[].candidate_value | 是 | 与 Slot 类型匹配的候选值 |
-| answers[].confidence | 是 | 模型置信度 |
-| answers[].evidence | 应有 | 原文证据 |
+| answers | 是 | 本轮对当前问题填写的一个或多个字段，至少包含一项 |
+| answers[].ref | 是 | 被回答的 Slot 完整引用，必须出现在 `pending_interaction.fields` 中 |
+| answers[].raw_value | 是 | 用户表达该答案时使用的原文片段，例如“明天”或“第一个” |
+| answers[].candidate_value | 是 | 模型按 Slot 类型转换后的候选规范值，例如 `2026-09-20`；Harness 仍会重新规范化和校验 |
+| answers[].confidence | 是 | 模型对该字段和值映射的自评置信度，范围为 0 到 1，不提供写入权限 |
+| answers[].evidence | 应有 | 指向支持该答案的消息 ID 和原文区间，供 Harness 校验候选值确实来自用户表达 |
 
 `answer` 只能回答当前 ask，不能顺便写入其他 Slot。选项型回答必须匹配 `pending_interaction.options[].value`。
 
@@ -619,12 +639,12 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 | 字段 | 必填 | 含义 |
 |---|---:|---|
 | type | 是 | 固定为 `slot_change` |
-| changes | 是 | 至少一个修改项 |
-| changes[].ref | 是 | `allowed_slots` 中 mutable 的 Slot |
-| changes[].raw_value | 是 | 用户原始表达 |
-| changes[].candidate_value | 是 | 候选规范值 |
-| changes[].confidence | 是 | 模型置信度 |
-| changes[].evidence | 应有 | 原文证据 |
+| changes | 是 | 用户本轮要求修改的字段列表，至少包含一项 |
+| changes[].ref | 是 | 被修改的 Slot 完整引用，必须存在于 `allowed_slots` 且当前允许用户修改 |
+| changes[].raw_value | 是 | 用户表达新值时使用的原文片段 |
+| changes[].candidate_value | 是 | 模型转换出的候选规范值；Harness 校验通过后才会进入 Engine Command |
+| changes[].confidence | 是 | 模型对“用户确实在修改该字段”和候选值的自评置信度 |
+| changes[].evidence | 应有 | 支持本次修改的消息 ID 和原文区间 |
 
 模型不能输出 `invalidates`、`restart_at`、`target_node` 或 Policy。Harness 将全部合法变化合并为一个原子 `slot.change` Command。失效和重算由 Engine 根据 Workflow Definition 的依赖图计算。
 
@@ -667,10 +687,10 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 
 | 字段 | 必填 | 含义 |
 |---|---:|---|
-| intent | 是 | `intent_catalog` 中的稳定 ID |
-| confidence | 是 | 模型对语义映射的置信度 |
-| evidence | 应有 | 支持该意图的当前消息证据 |
-| entities | 否 | Catalog 明确允许的预路由实体 |
+| intent | 是 | 与用户业务目标最匹配的 `intent_catalog[].id`；模型不能生成目录之外的 ID |
+| confidence | 是 | 模型对当前用户消息与该业务目标相匹配程度的自评值 |
+| evidence | 应有 | 当前用户消息中明确表达该业务目标的原文区间；不能只引用历史摘要 |
+| entities | 否 | 目录允许随该意图提前提取的字段和值；Router 可以用它们选择能力，但仍需后续 Workflow 校验 |
 
 以下字段在 Business Intent 中非法：
 
@@ -720,6 +740,15 @@ Unmapped Request 只说明模型未在本次 Intent Catalog 中找到可靠映�
   "suggested_question": "你指的是 CA123 还是 MU5101？"
 }
 ~~~
+
+| 字段 | 含义 |
+|---|---|
+| kind | 程序可判断处理方式的歧义类别，例如 `reference`、`date` 或 `intent` |
+| about | 哪个 Slot、Interaction Act 或 Business Intent 因该歧义而不能继续处理 |
+| message_id | 引发歧义的原文所在消息 ID |
+| text | 无法唯一解释的原文片段，例如“那个航班” |
+| candidates | 当前上下文中可能的有限候选；无法可靠列举时使用空数组 |
+| suggested_question | 模型建议向用户提出的问题；Harness 必须校验和转义后才能展示 |
 
 Harness 可以重新表述 `suggested_question`，但不得在用户澄清前代替用户选择候选。
 
@@ -866,8 +895,8 @@ Interpretation answer
 | `answers[].ref` | `payload.answers` 的 key |
 | 规范化后的 candidate value | `payload.answers` 的 value |
 | 无 | `command_id`，由 Harness 生成 |
-| 无 | `interaction_id`，从 Engine Emission 取得 |
-| 无 | `expected_instance_revision`，从 Engine State 取得 |
+| 无 | `interaction_id`，由 Harness 从当前待回答问题的可信记录中取得；模型输入和输出都不包含它 |
+| 无 | `expected_instance_revision`，由 Harness 在提交前读取当前 Workflow Instance 的版本；模型不能提供它 |
 
 ### 16.2 slot_change
 
@@ -884,7 +913,7 @@ Interpretation slot_change
 
 ### 16.3 cancel_interaction
 
-`cancel_interaction` 编译为 `interaction.cancel`，并从当前 Engine Emission 取得 `interaction_id`。Engine 根据该 ID 找到对应的节点和等待状态。
+`cancel_interaction` 编译为 `interaction.cancel`。Harness 使用自己为当前待回答问题保存的真实 `interaction_id`；Engine 根据该 ID 找到对应节点和等待状态。
 
 ## 17. Harness 到 Intent Router 的交接
 
@@ -982,6 +1011,15 @@ Router Decision 不能反向写入 Interpretation Result，也不能由模型预
 模型只输出 Unmapped Request。Harness 不得因为裁剪后的 Intent Catalog 没有某个意图，就断言系统不支持。
 
 ## 18. Harness 最终输出
+
+Harness 最终只返回以下四种状态：
+
+| status | 何时使用 | 调用方接下来做什么 |
+|---|---|---|
+| commands_ready | 本轮只产生当前 Workflow 可以执行的 Command | 按顺序向 Workflow Engine 提交 `commands` |
+| routing_required | 本轮只提出业务目标或无法映射的请求 | 把 `router_requests` 交给 Intent Router，由 Router 决定使用哪个 Workflow |
+| commands_and_routing_ready | 同一句话同时包含当前流程修改和独立业务目标 | 分别提交 `commands` 和 `router_requests`，并保留原消息中的语义顺序 |
+| clarification_required | 存在会影响执行正确性的歧义或冲突 | 不提交受影响的 Command，向用户展示 `user_response` 中的澄清问题 |
 
 ### 18.1 commands_ready
 

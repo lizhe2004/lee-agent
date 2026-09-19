@@ -11,6 +11,26 @@
 
 ---
 
+## 0. 本文所需的最小术语
+
+本文可以单独用于编写和评审 Workflow Definition。以下术语在全文中保持同一含义：
+
+| 术语 | 在本文中的含义 |
+|---|---|
+| Workflow Definition | 本文定义的静态 JSON 文档；它描述一类业务流程，不包含任何具体用户的数据和进度 |
+| Workflow Instance | Engine 根据某个准确 Definition 版本创建的一次具体运行，例如某位用户的一次退款申请 |
+| Runtime State | 某个 Instance 当前保存的节点进度、数据值、版本、等待和副作用记录，不写回 Definition |
+| Engine | 读取 Definition、接收结构化事件并确定性更新 Runtime State 的执行组件 |
+| Node | 流程中的一个步骤，例如询问用户、调用工具、判断条件或结束实例 |
+| Slot | 允许用户、调用方、可信事件或系统默认值提供和修改的业务变量 |
+| Artifact | Node 或工具运行后产生的派生结果，外部用户不能直接写入 |
+| data reference | 带命名空间的数据地址，例如 `slots.departure_date` 或 `artifacts.flight_search` |
+| Transition | 一个 Node 完成后选择下一个 Node 的控制流规则 |
+| revision | Runtime 中某个实例或数据值的单调递增版本，用于检测并发修改和判断派生结果是否过期 |
+| Effect | 会影响 Workflow 外部世界的操作，例如创建订单、退款或发送短信 |
+
+外部组件如何传递用户消息和 Engine Command 有独立协议，但本文会直接说明 Definition 中每个字段对运行行为的影响。
+
 # 第一部分：Definition 语言
 
 ## 1. 范围与设计原则
@@ -73,9 +93,9 @@ context.workflow_instance_id
 
 | 命名空间 | 含义 |
 |---|---|
-| slots | 调用方、用户或外部事件可写入的流程变量 |
-| artifacts | Workflow 执行产生的派生结果 |
-| context | Engine 提供的只读执行上下文 |
+| slots | 外部主体可按声明来源提供或修改的流程变量；引用写成 `slots.<slot_id>` |
+| artifacts | Node、工具或子 Workflow 产生的派生结果；引用写成 `artifacts.<artifact_id>`，用户不能直接写入 |
+| context | Engine 为当前执行提供的只读元数据，例如实例 ID；Definition 可以读取允许字段，但不能修改 |
 
 ### 2.3 数据类型
 
@@ -117,17 +137,17 @@ Definition 使用 MAJOR.MINOR.PATCH 语义化版本。已启动的 Workflow Inst
 
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
-| spec_version | string | 是 | 本文规范的版本 |
-| id | identifier | 是 | Workflow 稳定 ID |
-| version | semver | 是 | Definition 版本 |
-| title | string | 否 | 面向维护者的名称 |
-| description | string | 否 | 流程用途说明 |
-| entry | node ID | 是 | 新实例入口节点 |
-| slots | object | 是 | Slot 声明 |
-| artifacts | object | 是 | 派生结果声明 |
-| nodes | object | 是 | 节点定义 |
-| dependencies | array | 否 | 对自动依赖图的显式补充或覆盖 |
-| policies | array | 否 | 业务、安全和风控规则 |
+| spec_version | string | 是 | 该 JSON 使用的 Workflow Definition 语法版本；Loader 据此选择解析和校验规则 |
+| id | identifier | 是 | 流程模板的长期稳定 ID，例如 `flight_booking`；显示名称变化时不应更改 |
+| version | semver | 是 | 这份 Definition 自身的语义化版本；每个已启动实例固定使用一个准确版本 |
+| title | string | 否 | 供维护者和管理界面显示的简短名称，不参与运行判断 |
+| description | string | 否 | 说明流程处理的业务目标和范围，不作为 Engine 执行指令 |
+| entry | node ID | 是 | 新实例创建后第一个进入的节点；必须存在于本文件的 `nodes` 中 |
+| slots | object | 是 | 本流程允许外部提供或修改的业务变量定义；对象 key 是 Slot ID |
+| artifacts | object | 是 | 本流程运行期间可以产生的派生结果定义；对象 key 是 Artifact ID |
+| nodes | object | 是 | 流程所有可执行步骤；对象 key 是 Node ID，Transition 只能指向这里声明的节点 |
+| dependencies | array | 否 | 当 Node 的 `inputs/outputs` 不能准确表达数据血缘时，对直接依赖边进行补充或替换 |
+| policies | array | 否 | 普通数据依赖无法表达的业务、安全、权限和不可逆操作规则 |
 
 未知顶层字段必须被拒绝，除非规范定义了明确的扩展命名空间。
 
@@ -162,15 +182,15 @@ Slot 是 Workflow Instance 中允许外部主体提供、选择或修改的数�
 
 | 字段 | 必填 | 含义 |
 |---|---:|---|
-| type | 是 | 规范化后的数据类型 |
-| schema | 复杂类型时 | 类型结构 |
-| values | enum 时 | 允许值 |
-| required | 是 | Workflow 成功完成前是否必须存在 |
-| source | 是 | 允许写入来源：user、caller、event、system |
-| mutable | 是 | never、always、until_irreversible_effect |
-| default | 否 | 无外部值时的确定性默认值 |
-| sensitive | 否 | 是否属于敏感数据 |
-| retention | 否 | 建议保留范围：turn、instance、audit、none |
+| type | 是 | Slot 规范值的数据类型，例如 `date`、`boolean`、`enum` 或 `object`；所有写入都必须通过该类型校验 |
+| schema | object、array 等复杂类型时 | 复杂值必须符合的已注册结构版本，用于拒绝缺字段或类型错误的数据 |
+| values | `enum` 时 | 该枚举允许保存的完整规范值集合；展示文案可以本地化，但写入值只能来自此集合 |
+| required | 是 | 实例走到成功终态前该 Slot 是否必须有有效值；不表示启动实例时就必须提供 |
+| source | 是 | 哪类主体允许产生该值：用户、启动调用方、可信事件或系统默认逻辑；不在名单中的来源不得写入 |
+| mutable | 是 | 用户或调用方何时可以修改：从不、始终或只允许在不可逆 Effect 提交之前 |
+| default | 否 | 没有外部输入时由 Engine 使用的确定性默认值；不能依赖当前时间或随机结果，除非明确建模为系统输入 |
+| sensitive | 否 | 是否包含手机号、证件号等需要限制展示、日志和访问权限的数据，默认 `false` |
+| retention | 否 | 该值允许保留到本轮、整个实例、审计存档，或者完全不持久化 |
 
 required 不表示 Workflow 启动时必须已有该值。节点可以在真正使用之前收集它。
 
@@ -204,12 +224,12 @@ Artifact 是节点产生的派生事实。工具结果、计算结果、验证�
 
 | 字段 | 必填 | 含义 |
 |---|---:|---|
-| type | 是 | artifact 值类型 |
-| schema | 复杂类型时 | 值结构 |
-| owner | 是 | tool、system、workflow |
-| validity.ttl | 否 | 最长有效时间 |
-| sensitive | 否 | 是否敏感 |
-| retention | 否 | 建议保留范围 |
+| type | 是 | Artifact 值的数据类型；生产节点提交结果时必须通过校验 |
+| schema | 复杂类型时 | 对象或数组必须符合的已注册结构版本 |
+| owner | 是 | 哪类受信任生产者可以生成该结果：工具、Engine 系统逻辑或子 Workflow；用户永远不能直接写入 |
+| validity.ttl | 否 | 结果从产生时起最多可使用多久；超期后标记为 stale，并在需要时重新生成 |
+| sensitive | 否 | 是否需要限制展示、日志和读取权限，默认 `false` |
+| retention | 否 | 结果允许保留到哪个范围，例如当前实例或审计记录 |
 
 Artifact 的 producer 由 node.outputs 推导，不在 artifact 中重复声明。默认每个 artifact 只有一个 producer。需要多来源合并时，应通过明确的 merge action 产生最终 artifact。
 
@@ -225,12 +245,12 @@ Artifact 的 producer 由 node.outputs 推导，不在 artifact 中重复声明�
 
 | 状态 | 含义 |
 |---|---|
-| absent | 尚无值 |
-| pending | 正在产生 |
-| valid | 当前可使用 |
-| stale | 上游版本或 TTL 已变化，需要重算 |
-| invalid | 被业务或安全规则撤销 |
-| error | 最近一次产生失败 |
+| absent | 从未产生值，或当前值已经被明确清除；读取它的节点不能执行 |
+| pending | 生产该值的工具、子流程或事件仍在等待结果；旧值不能作为当前结果使用 |
+| valid | 值存在、类型正确、依赖版本仍匹配且未超过有效期，节点可以读取 |
+| stale | 值本身可能仍被保存用于审计，但它依赖的上游值或 TTL 已变化，必须重新生成后才能使用 |
+| invalid | 值被业务、安全或权限规则明确撤销，不能通过普通缓存复用恢复为 valid |
+| error | 最近一次生产尝试失败，Runtime 应同时保存受控错误信息和可重试状态 |
 
 只有 valid 数据可以满足节点 inputs 和 requires。
 
@@ -240,16 +260,16 @@ Artifact 的 producer 由 node.outputs 推导，不在 artifact 中重复声明�
 
 | 字段 | 类型 | 必填 | 默认值 | 含义 |
 |---|---|---:|---|---|
-| type | enum | 是 | 无 | 节点类型，决定允许出现的专属字段 |
-| inputs | data-ref[] | 否 | [] | 节点会读取的完整 Slot 和 Artifact 引用 |
-| outputs | data-ref[] | 否 | [] | 节点被允许写入的 Slot 和 Artifact 引用 |
-| requires | expression[] | 否 | [] | 执行前必须全部为 true 的确定性条件 |
-| on_guard_failure | node ID | 有 requires 时 | 无 | 任一 requires 为 false 或 unknown 时的确定性目标 |
-| timeout | duration | 否 | 节点类型默认值 | 本次执行或等待的最长时间 |
-| retry | object | 否 | 不重试 | action 和 call 的自动重试规则 |
-| max_visits | integer | 否 | 无限制 | 同一实例最多进入该节点的次数 |
-| on_limit | node ID | 有 max_visits 时 | 无 | 达到访问上限后的目标节点 |
-| metadata | object | 否 | {} | 不影响运行语义的维护信息 |
+| type | enum | 是 | 无 | 节点执行方式，例如 `ask`、`action`、`branch` 或 `end`；它决定还允许出现哪些专属字段 |
+| inputs | data-ref[] | 否 | `[]` | 该节点可能读取的全部 Slot 和 Artifact；Engine 用它检查可执行性、限制模板读取并建立数据依赖 |
+| outputs | data-ref[] | 否 | `[]` | 该节点唯一允许写入的 Slot 和 Artifact；工具多返回的字段也不能越过此白名单 |
+| requires | expression[] | 否 | `[]` | 节点执行前必须全部求值为 true 的业务或安全条件；false 和 unknown 都不执行节点 |
+| on_guard_failure | node ID | 声明 requires 时 | 无 | 任一前置条件不满足时进入的确定节点；缺少该字段会使 Definition 无法安全执行 |
+| timeout | duration | 否 | 由节点类型决定 | 节点本次执行或等待允许持续的最长时间；到期后只能走明确声明的超时路径 |
+| retry | object | 否 | 不重试 | action 或 call 发生允许重试的技术错误时，由 Engine 执行的次数和退避规则 |
+| max_visits | integer | 否 | 无限制 | 同一个实例最多可以进入该节点多少次，用于阻止验证码或补充信息流程无限循环 |
+| on_limit | node ID | 声明 max_visits 时 | 无 | 下一次进入会超过上限时改走的节点，当前节点不再执行 |
+| metadata | object | 否 | `{}` | 维护者、文档或管理界面使用的信息；Engine 不得根据它改变业务行为 |
 
 未知公共字段必须被拒绝。节点专属字段只能出现在对应 type 中。
 
@@ -322,18 +342,18 @@ ask 专属字段：
 
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
-| request | object | 是 | 对外发出的输入请求 |
-| on | object | 是 | 等待事件到达后的事件类型到 node ID 映射 |
+| request | object | 是 | Engine 需要 Harness 向用户表达的问题以及本次允许填写的字段和选项 |
+| on | object | 是 | 用户回答或取消后使用的事件名到下一 Node ID 的映射；每个会结束等待的事件都必须有目标 |
 
 request 字段：
 
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
-| kind | enum | 是 | form、selection、confirmation、text |
-| prompt | string | 是 | 面向外部交互层的稳定提示；不得承担业务判断 |
-| fields | slot-ref[] | 是 | 本次回答允许填写的 slots，必须与 node.outputs 一致 |
-| options_from | data-ref | selection 时 | 可选项来源，必须包含在 node.inputs 中 |
-| accepts | event-type[] | 是 | 当前等待点接受的普通事件类型，例如 answer、cancel |
+| kind | enum | 是 | 用户输入形式：`form` 一次填写多个字段、`selection` 从列表选择、`confirmation` 确认是非、`text` 输入自由文本 |
+| prompt | string | 是 | Harness 应向用户表达的问题；它只负责说明要回答什么，不能依靠话术隐藏未声明的业务判断 |
+| fields | slot-ref[] | 是 | 本次回答唯一允许写入的 Slot 完整引用，且必须同时出现在当前 Node 的 outputs 中 |
+| options_from | data-ref | `selection` 时 | 生成当前可选项列表的数据引用；它必须存在于 inputs，数据失效后旧选项也随之失效 |
+| accepts | event-type[] | 是 | 当前问题允许以哪些普通交互结果结束，例如回答或放弃；Slot 修改是实例级事件，不写在这里 |
 
 on 必须覆盖 accepts 中所有会结束本次等待的事件。answer 事件只能写入 request.fields 和 node.outputs 共同声明的 slots，并且写入值必须通过 Slot 类型与来源校验。
 
@@ -377,11 +397,11 @@ action 专属字段：
 
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
-| tool | tool-ref | 是 | 已注册工具及其合同版本 |
-| arguments | object | 否 | 工具参数模板；所有引用必须包含在 node.inputs 中 |
-| result | object | 有 outputs 时 | 工具结果字段到 node.outputs 的绑定 |
-| statuses | object | 是 | 工具状态到后继 node ID 的完整映射 |
-| effect | object | 是 | 副作用等级、幂等和输入修改后的处理规则 |
+| tool | tool-ref | 是 | 要调用的已注册工具及准确合同版本，例如 `flight.search@2`；Engine 只能调用注册表中的匹配版本 |
+| arguments | object | 否 | 发送给工具的参数模板；每个数据引用必须已列入 inputs，渲染和类型校验完成后才能调用 |
+| result | object | 声明 outputs 时 | 将工具返回字段绑定到哪些 Node outputs；未绑定结果不得写入 Runtime State |
+| statuses | object | 是 | 工具合同可能返回的每个稳定状态到下一 Node ID 的完整映射；未知状态按合同错误停止 |
+| effect | object | 是 | 说明工具是否影响外部世界，以及副作用调用所需的幂等键、补偿和上游修改处理方式 |
 
 arguments 渲染失败时不得调用工具。result 绑定后的值必须通过 Slot 或 Artifact 类型校验。工具返回未声明状态、缺失结果字段或不符合 schema 时产生 contract_error，不能按 success 迁移。
 
@@ -407,10 +427,10 @@ branch 专属字段：
 
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
-| cases | object[] | 是 | 按数组顺序匹配的条件分支，至少包含一项 |
-| cases[].when | expression | 是 | 只读布尔条件；引用必须包含在 node.inputs 中 |
-| cases[].next | node ID | 是 | 条件为 true 时的目标节点 |
-| default | node ID | 是 | 没有 condition 为 true 时的目标节点 |
+| cases | object[] | 是 | 按声明顺序检查的候选分支，至少一项；第一个条件为 true 的分支获胜 |
+| cases[].when | expression | 是 | 只读取 inputs 的受限条件表达式；结果为 unknown 时视为未命中 |
+| cases[].next | node ID | 是 | 对应条件为 true 时进入的下一节点 |
+| default | node ID | 是 | 所有条件都没有命中时进入的确定节点，保证分支总有结果 |
 
 branch 不得声明 outputs、retry 或 effect。condition 为 unknown 时视为未命中，继续检查下一项。
 
@@ -437,11 +457,11 @@ respond 专属字段：
 
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
-| response | object | 是 | 对外响应合同 |
-| response.code | string | 是 | 稳定、机器可读的响应代码 |
-| response.template | string | 否 | 展示模板；只能引用 node.inputs |
-| response.data | object | 否 | 结构化响应数据；只能引用 node.inputs |
-| next | node ID | 是 | 响应成功发出后的后继节点 |
+| response | object | 是 | Engine 要求 Harness 或渠道对外发送的结构化内容，包含稳定代码、可选文案和数据 |
+| response.code | string | 是 | 调用方可以稳定判断的响应类别，不随语言和展示文案变化 |
+| response.template | string | 否 | 面向用户的展示模板，只能使用 inputs 中已经声明且当前有效的数据 |
+| response.data | object | 否 | 供 UI 或调用方使用的结构化展示数据，同样只能引用 inputs |
+| next | node ID | 是 | 响应成功提交后继续进入的节点；respond 本身不是流程终点 |
 
 respond 不产生可信业务 Artifact。需要记录“通知已经送达”时，应通过有明确回执的 action 或 wait 建模。
 
@@ -473,13 +493,13 @@ wait 专属字段：
 
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
-| event | object | 是 | 允许恢复该节点的事件合同 |
-| event.type | string | 是 | 稳定事件类型 |
-| event.source | string | 是 | 可信事件来源 |
-| correlation_key | template | 是 | 将外部事件绑定到当前实例和等待点 |
-| result | object | 有 outputs 时 | 事件 payload 到 node.outputs 的绑定 |
-| on.received | node ID | 是 | 合法事件到达后的目标节点 |
-| on.timeout | node ID | 设置 timeout 时 | 等待超时后的目标节点 |
+| event | object | 是 | 唯一允许恢复这次等待的外部事件合同，包含事件类型和可信来源 |
+| event.type | string | 是 | 来源系统和 Engine 共同约定的稳定事件类型，例如人工审核完成 |
+| event.source | string | 是 | 允许发送该事件的已认证服务 ID；相同 payload 来自其他主体时必须拒绝 |
+| correlation_key | template | 是 | 从当前实例数据计算的关联值；外部事件必须携带相同值，才能绑定到这一次等待 |
+| result | object | 声明 outputs 时 | 将合法事件 payload 中的字段绑定到当前 Node outputs |
+| on.received | node ID | 是 | 合法且未重复的事件通过全部校验后进入的节点 |
+| on.timeout | node ID | 设置 timeout 时 | 等待时间到期且尚未收到合法事件时进入的节点 |
 
 不匹配的事件不得关闭当前 wait。合法事件成功恢复后，该 wait 必须关闭；重复事件按幂等规则返回原处理结果。
 
@@ -516,12 +536,12 @@ call 专属字段：
 
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
-| workflow | object | 是 | 被调用 Workflow 的 ID 和版本 |
-| workflow.id | workflow ID | 是 | 子 Workflow 稳定标识 |
-| workflow.version | exact semver | 是 | 发布时固定的准确版本 |
-| map_inputs | object | 否 | 子 Workflow slot 名称到父节点 node.inputs 引用的映射 |
-| map_outputs | object | 否 | 子 Workflow result 名称到父节点 node.outputs 引用的映射 |
-| on | object | 是 | completed、cancelled、failed 等 outcome 到后继节点的映射 |
+| workflow | object | 是 | 要创建的子 Workflow Definition 引用，由稳定 ID 和准确版本组成 |
+| workflow.id | workflow ID | 是 | 子流程模板 ID，例如 `identity_verification` |
+| workflow.version | exact semver | 是 | 发布父 Definition 时固定的子流程准确版本，不能使用 `latest` 或版本范围 |
+| map_inputs | object | 否 | 子流程 Slot 名称到父 Node inputs 的映射；只把显式列出的父数据传入子实例 |
+| map_outputs | object | 否 | 子流程公开结果名称到父 Node outputs 的映射；子流程其他内部状态不会泄露给父流程 |
+| on | object | 是 | 子流程以 completed、cancelled 或 failed 等 outcome 结束后，父流程分别进入哪个节点 |
 
 call 的子 Workflow 状态与父 Workflow 隔离。未通过 map_outputs 导出的内部 Artifact 不得被父 Workflow 读取。
 
@@ -544,8 +564,8 @@ end 专属字段：
 
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
-| outcome | string | 是 | 稳定的 Workflow 终止结果 |
-| result | object | 否 | 返回给调用方或父 Workflow 的结构化结果 |
+| outcome | string | 是 | 实例终止类别的稳定机器值，例如 `completed`、`cancelled` 或 `no_result`；不等同于任意业务事实 |
+| result | object | 否 | 实例允许返回给启动调用方或父 Workflow 的公开结果，只能引用 inputs 中的有效数据 |
 
 result 中的引用必须包含在 node.inputs 中。end 不允许 next、outputs、retry 或 effect。进入 end 后实例成为终止状态。
 
@@ -555,11 +575,11 @@ Transition 是节点定义的一部分，常见形式为 next、on、statuses、
 
 | 形式 | 所属节点 | 选择依据 |
 |---|---|---|
-| next | respond 等单一后继节点 | 当前节点成功完成 |
-| on | ask、wait、call | 外部事件或子 Workflow outcome |
-| statuses | action | 工具返回的稳定状态 |
-| cases[].next | branch | 第一个为 true 的 condition |
-| default | branch | 没有 condition 命中 |
+| next | respond 等只有一个正常后继的节点 | 当前节点成功完成后无条件进入指定节点 |
+| on | ask、wait、call | 根据用户回答、外部事件或子 Workflow outcome 的稳定名称选择目标 |
+| statuses | action | 根据工具合同返回的稳定状态选择目标，不读取自然语言错误文案 |
+| cases[].next | branch | 按顺序求值后，第一个结果为 true 的条件决定目标 |
+| default | branch | 所有 branch 条件均为 false 或 unknown 时使用的兜底目标 |
 
 同一次节点完成只能选择一个控制流后继。Definition 不得依靠对象字段顺序解决 transition 冲突。
 
@@ -602,10 +622,10 @@ slots.departure_date ─┘
 
 | 字段 | 含义 |
 |---|---|
-| target | 被影响的数据 |
-| sources | target 的直接上游 |
-| mode | extend 追加；replace 替换自动依赖 |
-| when | 可选的条件依赖表达式 |
+| target | 依赖关系的下游 Slot 或 Artifact；任一实际使用的 source 变化时，它需要失效 |
+| sources | target 本次计算直接读取的上游数据引用；这里只声明一层关系，传递失效由 Engine 计算 |
+| mode | `extend` 在 Node 自动依赖上追加 sources；`replace` 用这里的 sources 完全替换自动依赖 |
+| when | 可选受限表达式；只有产生 target 时条件为 true，当前依赖边才生效并写入运行时血缘 |
 
 replace 可能造成漏失效，SHOULD 仅用于 output 确实只依赖部分 node.inputs 的情况。
 
@@ -661,14 +681,26 @@ Policy 只表达普通数据血缘无法完整推导的业务、安全或权限�
 
 标准 trigger 包括 slot.changed、artifact.changed、artifact.expired、external.event、effect.committed 和 permission.changed。
 
+Policy 字段：
+
+| 字段 | 必填 | 含义 |
+|---|---:|---|
+| id | 是 | Policy 的稳定唯一 ID，用于审计记录说明是哪条规则产生了影响 |
+| priority | 是 | 多条 Policy 同时命中时的计算顺序，数值越大越先处理；它不能用来覆盖显式冲突规则 |
+| trigger.type | 是 | 哪类已验证运行事件触发本 Policy，例如 Slot 改变、Artifact 过期或外部 Effect 已提交 |
+| trigger.ref | 事件类型需要目标时 | 触发事件必须涉及的具体 Slot 或 Artifact；省略时表示匹配该类型允许的全部目标 |
+| when | 否 | 读取已声明 Runtime 数据的附加条件；只有结果为 true 时才执行 effects |
+| effects | 是 | 命中后必须原子应用的一个或多个标准动作；不得在这里嵌入任意代码 |
+| reason | 是 | 机器可读的稳定原因，供 Decision、审计和用户解释策略引用 |
+
 标准 effect：
 
 | effect | 含义 |
 |---|---|
-| invalidate | 将目标标为 invalid |
-| require_revalidation | 要求指定验证结果重新产生 |
-| block | 阻止当前操作并返回原因 |
-| redirect | 指定必须进入的处理节点 |
+| invalidate | 把指定 Slot 或 Artifact 标记为 invalid，后续节点不能再使用旧值 |
+| require_revalidation | 要求指定验证类结果重新产生，例如手机号变化后重新验证身份 |
+| block | 拒绝当前触发操作并返回稳定原因；Runtime State 不得出现部分修改 |
+| redirect | 当前事件处理完成后强制进入指定节点，例如已经出票后改日期必须进入改签流程 |
 
 Policy 不得直接产生业务成功结果，也不得把 invalid 数据改回 valid。
 
