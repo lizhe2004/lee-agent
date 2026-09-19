@@ -27,6 +27,7 @@
 - `pyproject.toml`: package metadata, runtime dependency, and pytest configuration.
 - `src/support_agent/models.py`: typed case, tool result, workflow definition, and per-fact source/revision structures.
 - `schemas/workflow.schema.json`: formal JSON Schema (Draft 2020-12) for the workflow language.
+- `docs/workflow-definition-spec.md`: field-by-field runtime semantics and authoring rules for workflow JSON.
 - `src/support_agent/workflow_loader.py`: JSON parsing, JSON Schema checks, semantic graph validation, and definition registry.
 - `src/support_agent/store.py`: SQLite case and event persistence.
 - `src/support_agent/workflow_engine.py`: deterministic node execution and transitions.
