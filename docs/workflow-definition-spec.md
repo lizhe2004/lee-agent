@@ -28,6 +28,7 @@
 | Transition | 一个 Node 完成后选择下一个 Node 的控制流规则 |
 | revision | Runtime 中某个实例或数据值的单调递增版本，用于检测并发修改和判断派生结果是否过期 |
 | Effect | 会影响 Workflow 外部世界的操作，例如创建订单、退款或发送短信 |
+| Field Registry | 可跨多个 Intent 和 Workflow 复用的业务字段定义目录；它定义类型、规范化和敏感级别，不保存某个 Instance 的当前值 |
 
 外部组件如何传递用户消息和 Engine Command 有独立协议，但本文会直接说明 Definition 中每个字段对运行行为的影响。
 
@@ -43,6 +44,7 @@
 | slot-ref、artifact-ref、data-ref | 分别引用 Slot、Artifact，或两者之一；均必须使用完整命名空间 |
 | node ID、workflow ID | 符合 identifier 规则并指向当前 Definition 或明确引用 Definition 的字符串 |
 | schema-ref、tool-ref | 已注册对象的准确版本引用，不能使用 `latest` 或版本范围 |
+| field-ref | Field Registry 中可复用业务字段的稳定 ID，例如 `order_reference`；它不是 `slots.<id>` 地址 |
 | exact semver | `MAJOR.MINOR.PATCH` 形式的准确语义化版本 |
 | datetime、duration | 分别是带时区的 RFC 3339 时间和正 ISO 8601 时长 |
 | expression、template | 分别遵循第 2.4 节和第 2.5 节限制的字符串 |
@@ -202,6 +204,7 @@ Slot 是 Workflow Instance 中允许外部主体提供、选择或修改的数�
 |---|---|---:|---|
 | type | slot-type | 是 | 规范值类型；基础值允许 `string`、`integer`、`number`、`boolean`、`date`、`datetime`、`money`、`phone`、`email`、`enum`、`object`、`array`，扩展类型必须在注册表中存在 |
 | schema | schema-ref | `object`、`array` 或注册扩展类型时 | 已注册的准确结构版本，用于校验嵌套字段和类型；不能使用版本范围 |
+| field_ref | field-ref | 否 | 可复用业务字段的 Registry ID；存在时，当前 Slot 的 type、schema、sensitive 和规范化规则必须与该字段一致。它不改变当前 Slot 的 source、mutable 或 retention |
 | values | array<any> | `enum` 时 | 非空、无重复的完整规范值集合；每项必须是同一种 JSON 类型 |
 | required | boolean | 是 | 成功终态前是否必须有有效值；不表示启动时必须提供 |
 | source | array<enum> | 是 | 至少一项且不得重复；只允许 `user`、`caller`、`event` 或 `system_default` |
@@ -211,6 +214,8 @@ Slot 是 Workflow Instance 中允许外部主体提供、选择或修改的数�
 | retention | enum | 否 | 只允许 `turn`、`instance`、`audit` 或 `none`；省略时由部署的数据治理策略决定 |
 
 required 不表示 Workflow 启动时必须已有该值。节点可以在真正使用之前收集它。
+
+`field_ref` 是对共享字段语义的可选引用。没有 `field_ref` 时，Slot 使用本 Definition 中的 `type`、`schema` 和其他声明；有 `field_ref` 时，Loader 必须校验两边的类型、Schema、敏感级别和规范化规则一致。`field_ref` 不会自动改变 Slot 的 `source`、`mutable`、`retention`，也不会让该 Slot 自动出现在任何 Intent 的 `allowed_entities` 中。
 
 #### 4.1.2 用户选择也是 Slot
 

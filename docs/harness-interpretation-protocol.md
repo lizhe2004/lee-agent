@@ -28,6 +28,7 @@
 | Engine Emission | Engine 产生的结构化输出，例如要求询问用户、调用工具或报告流程完成 |
 | Business Intent | 用户希望完成的业务目标，例如退款或关闭自动续费；它不表示应该新建还是继续某个 Workflow |
 | Intent Router | 根据业务意图、活动流程和系统能力决定继续、恢复或创建哪个 Workflow 的组件 |
+| Field Registry | 可跨 Intent 和 Workflow 复用的业务字段定义目录；它定义字段的类型、规范化和敏感级别，不保存某个实例的当前值 |
 
 另外两份规范用于定义这些对象的完整执行规则；本文会在字段第一次出现时给出足以理解本协议的含义。
 
@@ -43,6 +44,7 @@
 | A \| B | 值可以是 A 或 B 两种类型之一 |
 | datetime | 带时区偏移的 RFC 3339 日期时间字符串 |
 | slot-ref | 形如 `slots.departure_date` 的完整 Slot 引用 |
+| field-ref | Field Registry 中的稳定字段 ID，例如 `order_reference`；它不是 Runtime State 地址 |
 | any | JSON 值的形状由被引用 Slot、Intent Entity 或其他明确合同决定，不表示跳过校验 |
 
 “必填”列描述字段在什么条件下必须出现；“否”表示字段可以省略，不等于可以传入任意值。本文未明确允许的未知字段必须拒绝。
@@ -506,14 +508,17 @@ Harness 根据可信的 Definition 和 Runtime State 固定生成下面的映射
 `allowed_slots` 只能包括：
 
 - 当前 ask 的 `request.fields`；
-- 当前实例中 `source` 允许用户写入且 `mutable` 允许修改的 Slots；
-- Intent Catalog 明确允许提取的预路由实体对应的临时字段。
+- 当前实例中 `source` 允许用户写入且 `mutable` 允许修改的 Slots。
+
+预路由阶段的实体不应为了复用这张表而伪装成 Runtime Slot；它们通过 `allowed_entities` 和 Field Registry 传递。只有 Router 已经把实体明确绑定到某个 Workflow 的初始 Slot 后，才会作为 `workflow.start.initial_slots` 或后续 `slot.change` 的候选值进入 Engine 校验。
 
 每个 Slot 描述可包含：
 
 | 字段 | 类型 | 必填 | 含义与约束 |
 |---|---|---:|---|
 | type | slot-type | 是 | 目标 Slot 的规范值类型，例如 `string`、`date`、`boolean`、`enum`；候选值必须能通过该类型校验 |
+| field_ref | field-ref | 否 | 该 Slot 对应的 Field Registry 字段 ID；存在时，Slot 的 type、schema、sensitive 和规范化规则必须与 Registry 一致，但不会因此自动获得写入权限 |
+| schema | schema-ref | type 为 `object`、`array` 或注册扩展类型时 | 目标 Slot 的结构版本；存在时必须与 Field Registry 中同一 field_ref 的 schema 一致 |
 | mutable | boolean | 是 | 用户在当前流程阶段是否可以修改该 Slot；为 `false` 时不得输出针对它的 `slot_change` |
 | current_value | 与 type 一致 \| null | 否 | Engine 当前保存的规范值；只在理解更正、指代或“保持原值”确实需要时提供，尚无值时可为 `null` |
 | values | array<any> | type 为 enum 时 | enum 的完整允许值集合；每项类型必须与 Slot 一致，且不得重复 |
@@ -555,7 +560,7 @@ Intent Catalog 让模型把自然语言映射为稳定的 Business Intent ID。�
 | description | string | 是 | 该业务目标包含和排除范围的直接说明，模型以它作为分类依据 |
 | positive_examples | array<string> | 否 | 属于该意图的典型表达；每项必须非空，不代表只有这些说法才能命中 |
 | negative_examples | array<string> | 否 | 容易混淆但不属于该意图的表达，用于划清相邻意图边界 |
-| allowed_entities | array<string> | 否 | 允许随该意图提前提取的实体 ID 白名单；每个 ID 必须存在于可信 Entity Registry，不得重复，省略等同于空数组 |
+| allowed_entities | array<field-ref> | 否 | 允许随该意图提前提取的字段 ID 白名单；每个 ID 必须存在于可信 Field Registry，不得重复，省略等同于空数组 |
 
 ### 7.3 allowed_entities 的用途
 
@@ -569,7 +574,7 @@ Intent Catalog 让模型把自然语言映射为稳定的 Business Intent ID。�
 | `book_flight` | `origin`、`destination`、`departure_date` | “明天北京飞上海” | Router 可以据此选择机票能力，并把已提取的出发地、到达地和日期交给后续 Workflow 进行类型校验和补问 |
 | `cancel_auto_renewal` | 空数组 | “把自动续费关了” | 该意图不需要预路由实体；Workflow 后续再按账号和身份验证流程确定具体订阅 |
 
-这里的 `order_reference`、`origin` 和 `departure_date` 是实体名称，不是用户实际填写的值，也不是某个 Workflow 的节点 ID。它们必须解析到可信的 Entity Registry。Registry 至少为每个实体提供稳定名称、规范类型或 Schema、规范化器和敏感级别；模型不能自行发明实体类型或解释规则。
+这里的 `order_reference`、`origin` 和 `departure_date` 是 Field Registry 中的字段 ID，不是用户实际填写的值，也不是某个 Workflow 的节点 ID。它们在本协议的输出中被称为“实体”，是因为模型此时承担的是从用户消息中提取实体候选的角色。Registry 至少为每个字段提供稳定名称、规范类型或 Schema、规范化器和敏感级别；模型不能自行发明字段类型或解释规则。
 
 `allowed_entities` 的处理顺序是：
 
@@ -591,14 +596,14 @@ Intent Catalog 让模型把自然语言映射为稳定的 Business Intent ID。�
 
 `allowed_slots` 描述当前 Workflow 在当前运行阶段允许回答或修改的 Slot；`allowed_entities` 描述路由前为了识别业务目标可以提取的实体。两者即使使用相同名称，也不存在自动映射关系，必须由 Router 或 Workflow Definition 的可信映射明确建立。
 
-### 7.4 Entity Registry 的最小合同
+### 7.4 Field Registry 的最小合同
 
-Entity Registry 是受信任的配置目录。Intent Catalog 只引用其中的实体 ID，不在自然语言描述里重新定义类型。每个被 `allowed_entities` 引用的实体至少应有：
+Field Registry 是受信任的静态配置目录。Intent Catalog 和 Workflow Definition 都可以引用其中的字段 ID，不在自然语言描述里重新定义类型。每个被 `allowed_entities` 或 Workflow Slot 引用的字段至少应有：
 
 | 字段 | 类型 | 必填 | 含义与约束 |
 |---|---|---:|---|
-| id | string | 是 | 稳定实体 ID，例如 `order_reference`；在 Registry 内唯一 |
-| type | slot-type 或 schema-ref | 是 | 实体候选值的规范类型；Harness 必须使用对应校验器 |
+| id | string | 是 | 稳定字段 ID，例如 `order_reference`；在 Registry 内唯一 |
+| type | slot-type 或 schema-ref | 是 | 字段候选值的规范类型；Harness 和 Engine 必须使用对应校验器 |
 | description | string | 是 | 给模型和维护者看的非空业务含义；不包含权限或流程跳转指令 |
 | normalizer | string | 是 | 已注册的确定性规范化器 ID；不能是模型临时生成的函数或代码 |
 | sensitive | boolean | 是 | 是否需要脱敏、限制日志和限制上下文传播 |
@@ -615,7 +620,7 @@ Entity Registry 是受信任的配置目录。Intent Catalog 只引用其中的�
 }
 ~~~
 
-Registry 只定义实体本身的语义和规范化方式，不定义它要启动哪个 Workflow。实体到 Workflow 初始 Slot 的映射属于 Router 或具体 Workflow 的可信配置。
+Field Registry 只定义字段本身的语义和规范化方式，不定义它要启动哪个 Workflow。实体候选到 Workflow 初始 Slot 的映射属于 Router 或具体 Workflow 的可信配置。
 
 Intent Catalog 不应包含：
 
@@ -835,7 +840,7 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 | confidence | number | 是 | 匹配程度的模型自评值，范围为闭区间 `[0, 1]` |
 | evidence | evidence | 是 | 当前 utterance 中明确表达该业务目标的原文区间；不能只引用历史摘要 |
 | entities | array<entity> | 是 | 随该意图提取的实体；没有时为空数组，名称必须位于该 Catalog 条目的 `allowed_entities` |
-| entities[].name | string | 每个 entity 必填 | Intent Catalog 允许的实体名称 |
+| entities[].name | field-ref | 每个 entity 必填 | Intent Catalog `allowed_entities` 中允许的字段 ID |
 | entities[].raw_value | string | 每个 entity 必填 | 用户表达该实体时使用的非空原文片段 |
 | entities[].candidate_value | any | 每个 entity 必填 | 模型转换出的候选值；Router 或 Workflow 仍需按目标字段重新校验 |
 | entities[].confidence | number | 每个 entity 必填 | 模型自评置信度，范围为闭区间 `[0, 1]` |
