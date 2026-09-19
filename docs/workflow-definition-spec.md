@@ -199,6 +199,74 @@ Schema 的 `additionalProperties: false` 表示顶层不能随便增加字段。
 | `priority` | 同一条消息修改多个字段时的重算优先级；数值越小越早。 |
 | `invalidates` | 修改后必须删除的派生事实、来源和版本。旧搜索结果、旧报价和旧确认都应列出。 |
 
+### 5.1 字段修改的完整示例
+
+下面的声明表示：`travel_date` 是用户可以再次修改的输入；如果它已经有值且用户提供了新值，工作流必须从 `search_flights` 重新查询，并清除基于旧日期产生的结果。
+
+```json
+{
+  "mutable_inputs": {
+    "travel_date": {
+      "type": "string",
+      "on_change": "search_flights",
+      "priority": 10,
+      "invalidates": [
+        "flight_search",
+        "selected_flight",
+        "cabin_quote",
+        "booking_confirmation"
+      ]
+    }
+  }
+}
+```
+
+字段的实际关系是：
+
+```text
+travel_date
+    ↓
+flight_search
+    ↓
+selected_flight
+    ↓
+cabin_quote
+    ↓
+booking_confirmation
+```
+
+第一次收集日期时，Harness 只写入用户事实并继续向前执行。如果案件已经查询并选定航班，用户随后说“改成 2026-09-21”，Harness 应产生结构化修改：
+
+```json
+{
+  "travel_date": "2026-09-21"
+}
+```
+
+引擎随后会：
+
+1. 校验字段类型，并确认它是声明过的 `mutable_input`。
+2. 更新日期，增加该事实的 revision，并记录来源为 `user`。
+3. 删除 `invalidates` 列出的事实、来源和 revision。
+4. 把 `current_node` 设置为 `search_flights`，清除等待用户状态。
+5. 重新查询航班；之后用户需要重新选择航班、舱位和报价，并重新确认。
+
+修改前的案件事实可能是：
+
+```json
+{
+  "travel_date": "2026-09-20",
+  "flight_search": {"date": "2026-09-20", "flights": ["F1", "F2"]},
+  "selected_flight": "F1",
+  "cabin_quote": {"cabin": "business", "price": 2500},
+  "booking_confirmation": true
+}
+```
+
+修改日期后，旧的搜索结果、选中航班、报价和确认事实都不能继续使用；日期以外仍然有效的用户输入（例如出发地、到达地和舱位偏好）可以保留并作为新查询的参数。
+
+`priority` 只在一条消息修改多个字段时使用。引擎选择数值最小的 `on_change` 入口，从最早受影响的步骤重新执行。`invalidates` 是 workflow 作者明确声明的清理清单；如果某个派生事实可能依赖该输入，就必须列入其中。
+
 引擎还记录 `fact_sources` 和 `fact_revisions`：用户字段来源是 `user`，工具结果来源是 `tool:<name>`。只有用户拥有的 mutable input 可以被用户更正；工具拥有的订单、资格和成功状态不能被覆盖。
 
 ### 机票例子
