@@ -1,6 +1,6 @@
 # Workflow JSON 定义规范
 
-本文说明 workflow JSON 每个字段的**运行时含义**。它和 [`schemas/workflow.schema.json`](../schemas/workflow.schema.json) 的关系是：Schema 负责判断 JSON 结构是否合法；本文说明字段在流程引擎中如何解释、什么时候生效、由谁写入，以及失败时发生什么。
+本文定义面向未来的 workflow JSON 规范。它和 [`schemas/workflow.schema.json`](../schemas/workflow.schema.json) 的关系是：Schema 负责判断 JSON 结构是否合法；本文说明字段在流程引擎中如何解释、什么时候生效、由谁写入，以及失败时发生什么。当前仓库中的 loader 和 engine 是原型实现，尚未覆盖本文所有目标字段；新增字段必须同步更新 Schema、loader、引擎和测试。
 
 ## 1. Workflow 是什么
 
@@ -13,6 +13,29 @@
 - 遇到 `ask`、`wait` 或 `end` 时暂停本轮运行。
 
 Workflow 定义的是程序必须遵守的执行规则，不是给模型阅读的长篇 SOP。Skill 可以解释同一流程应该如何和用户沟通，但不能替代 workflow 的门槛。
+
+### 1.1 静态定义和动态状态
+
+系统必须区分所有案件共享的静态 `Workflow Definition` 和每个案件独有的动态 `Workflow State`。
+
+| 对象 | 保存内容 | 生命周期 |
+|---|---|---|
+| Workflow Definition | 节点、跳转、输入输出、字段类型、修改规则、业务守卫、工具绑定 | 由版本管理；案件启动后固定版本 |
+| Workflow State | 当前节点、slots、artifacts、版本号、等待状态、审计事件 | 每个案件独立持久化；每轮消息更新 |
+
+静态定义回答“流程应该怎么运行”，动态状态回答“这个案件已经运行到哪里”。状态不能反过来修改 workflow 定义。
+
+### 1.2 slots 和 artifacts
+
+`slots` 是用户提供或选择的任务参数，例如出发地、日期、舱位和乘机人。`artifacts` 是节点或工具根据 slots 产生的派生事实，例如航班搜索结果、报价、订单和确认文案。
+
+```text
+slots:     origin, destination, departure_date, cabin
+               ↓
+artifacts: flight_search → selected_flight → cabin_quote
+```
+
+同一个名称不能同时作为用户输入和工具输出。用户选择的 `selected_flight_id` 可以是用户拥有的 slot，但它仍然可以声明依赖 `flight_search`；上游搜索失效时，该选择也必须清除。
 
 ## 2. 顶层字段
 
@@ -41,6 +64,17 @@ Workflow 定义的是程序必须遵守的执行规则，不是给模型阅读�
 | `mutable_inputs` | object | 否 | 声明用户后续可以修改的输入，以及修改后哪些事实失效、从哪里重新计算。见第 5 节。 |
 
 Schema 的 `additionalProperties: false` 表示顶层不能随便增加字段。需要增加运行语义时，先更新规范、Schema、loader 和引擎，不要静默接受未知字段。
+
+面向未来的定义还应增加以下顶层字段：
+
+| 字段 | 实际含义 |
+|---|---|
+| `slots` | 用户输入字段的类型、所有者、是否必填、是否允许修改及修改策略。它定义输入契约，不保存具体用户值。 |
+| `artifacts` | 派生事实的声明。每项说明产生它的节点、允许的来源和有效性策略。 |
+| `dependencies` | 可选的显式依赖覆盖。默认依赖由节点的 `inputs` 和 `outputs` 编译得到；该字段用于声明跨节点或外部业务依赖。 |
+| `policies` | 不能从普通数据依赖推导出的业务、安全和风控失效规则。 |
+
+这些字段属于目标规范。原型阶段可以继续使用 `mutable_inputs`，但迁移后的正式定义应将它映射到 `slots` 和 `policies`。
 
 ## 3. 通用节点字段
 
@@ -266,6 +300,82 @@ booking_confirmation
 修改日期后，旧的搜索结果、选中航班、报价和确认事实都不能继续使用；日期以外仍然有效的用户输入（例如出发地、到达地和舱位偏好）可以保留并作为新查询的参数。
 
 `priority` 只在一条消息修改多个字段时使用。引擎选择数值最小的 `on_change` 入口，从最早受影响的步骤重新执行。`invalidates` 是 workflow 作者明确声明的清理清单；如果某个派生事实可能依赖该输入，就必须列入其中。
+
+### 5.2 目标规范：节点输入输出和依赖图
+
+正式版本应在节点上声明 `inputs` 和 `outputs`：
+
+```json
+{
+  "id": "search_flights",
+  "type": "action",
+  "tool": "flight.search",
+  "inputs": ["origin", "destination", "departure_date", "cabin"],
+  "outputs": ["flight_search"]
+}
+```
+
+引擎编译 workflow 时，以 `inputs`/`outputs` 构建依赖图。运行工具后，系统还要在 artifact 上记录实际使用的事实版本：
+
+```json
+{
+  "name": "flight_search",
+  "depends_on": {
+    "origin": 1,
+    "destination": 1,
+    "departure_date": 3,
+    "cabin": 2
+  }
+}
+```
+
+用户修改 `departure_date` 后，引擎沿反向依赖图清除 `flight_search` 以及依赖它的 `selected_flight`、`cabin_quote` 和 `booking_confirmation`，再从最早受影响的节点继续执行。`depends_on` 是运行时血缘记录；`inputs`/`outputs` 是 workflow 的静态声明，两者不是重复的状态对象。
+
+### 5.3 业务和安全失效规则
+
+依赖图解决“结果计算是否仍然正确”，不能表达所有“是否仍然允许信任”的业务规则。定义中可用 `policies` 补充这种影响：
+
+```json
+{
+  "policies": {
+    "account_relation": {
+      "on_change": "verify_identity",
+      "invalidates": ["identity_verified", "account_binding", "refund_eligibility"],
+      "reason": "account_scope_changed"
+    }
+  }
+}
+```
+
+最终失效集合是“依赖图传播结果”和“策略规则结果”的并集。策略规则不能让用户直接覆盖工具拥有的事实；它只决定哪些事实必须撤销以及从哪里重新验证。
+
+### 5.4 `ask` 的修改路由
+
+`ask` 不是只能接受“是/否”的节点。目标规范允许声明当前问题可以接受的意图：
+
+```json
+{
+  "type": "ask",
+  "collect": ["booking_confirmation"],
+  "allowed_intents": ["confirm", "cancel", "modify"],
+  "intent_routes": {
+    "confirm": "create_booking",
+    "cancel": "end",
+    "modify": "apply_correction"
+  }
+}
+```
+
+Harness 负责把“改成明天”解析为结构化 patch：
+
+```json
+{
+  "intent": "modify",
+  "slot_changes": {"departure_date": "2026-09-21"}
+}
+```
+
+`slot_changes` 只是一轮消息的临时修改，不是持久化状态。引擎校验并应用它后，才更新 State 中的 slots，并按依赖图和 policies 失效 artifacts。
 
 引擎还记录 `fact_sources` 和 `fact_revisions`：用户字段来源是 `user`，工具结果来源是 `tool:<name>`。只有用户拥有的 mutable input 可以被用户更正；工具拥有的订单、资格和成功状态不能被覆盖。
 
