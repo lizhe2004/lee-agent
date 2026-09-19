@@ -252,6 +252,17 @@ Ambiguity 表示某个值、指代、动作或意图存在多个合理解释，�
 
 影响执行正确性的歧义必须阻止相关 Command 和 Router Request。
 
+### 3.5 结构化候选的公共元数据
+
+Interaction Act、Business Intent 和实体都是模型根据用户消息提出的候选。为了让 Harness 能够检查候选是否有原文依据、是否需要澄清，这些候选可以携带两类公共元数据：
+
+| 字段 | 作用 | 谁产生 | Harness 如何使用 |
+|---|---|---|---|
+| `evidence` | 指向用户消息中支持该候选的连续原文片段 | 模型提出候选时提供 | 根据消息 ID 和字符区间重新定位原文，检查候选是否有依据 |
+| `confidence` | 模型对“原文对应这个候选”的自评确定程度，范围为 0 到 1 | 模型提供 | 作为澄清、观测和评估信号；不能直接决定是否执行 |
+
+它们描述的是模型的解释过程，不是身份认证、权限、退款资格或工具执行结果。没有原文依据的候选不能因为 `confidence` 很高就被接受；有原文依据的候选也仍需通过白名单、类型、权限和业务规则校验。完整字段结构和校验规则见第 9 节。
+
 ## 4. Interpretation Request
 
 ### 4.1 公共结构
@@ -654,6 +665,34 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 }
 ~~~
 
+例如，当前消息是“我要订机票”，模型可以先输出一个带公共元数据的 Business Intent：
+
+~~~json
+{
+  "interpretation_version": "0.3",
+  "utterance_id": "msg_124",
+  "language": "zh-CN",
+  "interaction_acts": [],
+  "business_intents": [
+    {
+      "intent": "book_flight",
+      "confidence": 0.96,
+      "evidence": {
+        "message_id": "msg_124",
+        "text": "订机票",
+        "start": 2,
+        "end": 5
+      },
+      "entities": []
+    }
+  ],
+  "unmapped_requests": [],
+  "ambiguities": []
+}
+~~~
+
+这个结果只说明用户表达了“订机票”这个目标，并记录模型依据了哪段文字、自己有多确定；它不表示已经创建订票 Workflow，也不表示用户已经完成身份验证或提供了完整行程。
+
 ### 8.2 顶层字段
 
 | 字段 | 类型 | 必填 | 含义与约束 |
@@ -683,7 +722,7 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 
 ## 9. 结构化候选的证据与置信度
 
-Interpretation Result 中的答案、Slot 修改、实体和业务意图都是模型提出的候选，不是系统已经确认的事实。Harness 需要两类不同的元数据来检查这些候选：
+第 3.5 节已经介绍了这两个公共元数据。这里进一步规定它们的字段结构、适用对象和校验方式。Interpretation Result 中的答案、Slot 修改、实体和业务意图都是模型提出的候选，不是系统已经确认的事实。Harness 需要两类不同的元数据来检查这些候选：
 
 - `evidence` 说明候选来自哪条原始消息、哪一段文字，解决“模型依据了什么”的问题；
 - `confidence` 是模型对这次语义映射的自评，解决“模型自己有多确定”的问题。
