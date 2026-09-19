@@ -130,7 +130,132 @@ slots 不是“模型抽取到的所有信息”，而是 workflow 允许接受�
 - change_policy 决定已有值被修改后的回退入口和额外清理范围。
 - 用户本轮消息解析出的 slot_changes 是临时 patch，只有通过这些校验后才合并进动态 State。
 
-## 3. 通用节点字段
+## 3. artifacts：派生事实的完整规范
+
+artifact 是 workflow 执行产生的结果，不是用户原始输入。典型 artifact 包括航班搜索结果、报价、订单、退款资格和确认文案。静态定义只描述 artifact 的契约；真实值、来源和版本保存在动态 State.artifacts。
+
+### 3.1 artifact 定义
+
+~~~json
+{
+  "artifacts": {
+    "flight_search": {
+      "producer": "search_flights",
+      "owner": "tool",
+      "value_schema": "FlightSearchResult",
+      "cache": {
+        "enabled": true,
+        "ttl_seconds": 60
+      },
+      "retention": "case",
+      "sensitive": false
+    },
+    "cabin_quote": {
+      "producer": "quote_flight",
+      "owner": "tool",
+      "value_schema": "CabinQuote",
+      "cache": {
+        "enabled": false
+      },
+      "retention": "case",
+      "sensitive": false
+    }
+  }
+}
+~~~
+
+| 字段 | 必填 | 实际含义 |
+|---|---:|---|
+| artifact 名称 | 是 | 稳定的结果名称。名称不能同时被 slot 或另一个 producer 使用。 |
+| producer | 是 | 唯一产生该 artifact 的节点 ID。 |
+| owner | 是 | 通常为 tool 或 system。模型和用户不能直接写入 tool artifact。 |
+| value_schema | 是 | 结果结构的类型标识。工具返回的数据必须符合它。 |
+| cache.enabled | 否 | 是否允许复用历史结果。复用前必须检查依赖版本、TTL 和权限范围。 |
+| cache.ttl_seconds | 否 | 结果最多可复用多久；价格、库存等实时数据通常使用很短 TTL。 |
+| retention | 否 | 保存范围，例如 turn、case、audit 或 none。敏感值不能因为 cache 开启而长期保存。 |
+| sensitive | 否 | 是否需要加密、脱敏、最短保存和访问审计。 |
+
+### 3.2 artifact 的运行时状态
+
+工具成功后，State 中保存的不只是 value，还必须保存来源和依赖快照：
+
+~~~json
+{
+  "artifacts": {
+    "flight_search": {
+      "status": "valid",
+      "value": {
+        "flights": [{"id": "CA123", "price": 2100}]
+      },
+      "source": {
+        "kind": "tool",
+        "name": "flight.search",
+        "call_id": "call_72"
+      },
+      "revision": 3,
+      "depends_on": {
+        "origin": 1,
+        "destination": 1,
+        "departure_date": 2,
+        "cabin": 1
+      },
+      "created_at": "2026-09-19T10:00:00+08:00",
+      "expires_at": "2026-09-19T10:01:00+08:00"
+    }
+  }
+}
+~~~
+
+| 运行时字段 | 实际含义 |
+|---|---|
+| status | valid、stale、invalid、error 或 pending。invalid 的结果不能进入工具参数、分支或回复模板。 |
+| value | 工具返回的结构化业务数据，不应保存模型猜测的结果。 |
+| source | 产生结果的工具、调用 ID 或系统事件，用于审计和追责。 |
+| revision | 该 artifact 的版本，每次重新产生都递增。 |
+| depends_on | 产生它时各输入事实的 revision 快照。它是运行时血缘，不是静态字段值。 |
+| created_at / expires_at | 结果的时间边界，用于 TTL、价格和库存校验。 |
+
+### 3.3 artifact 生命周期
+
+一个 artifact 按以下状态流转：
+
+~~~text
+absent → pending → valid
+                   ├→ stale（上游版本改变或超过 TTL）
+                   ├→ invalid（业务策略主动撤销）
+                   └→ error（工具失败）
+~~~
+
+- action 开始前可以创建 pending，但 pending 不能满足后续 requires。
+- 工具成功且版本仍匹配时变为 valid。
+- 上游 slot 或 artifact 版本改变时变为 stale，并从可用上下文中移除。
+- policies 要求撤销时变为 invalid；invalid 需要重新执行指定验证或计算节点。
+- 工具失败时记录 error。是否重试由工具层或 transitions 决定，不能由模型自行重试写操作。
+
+### 3.4 artifact 和 slot 的边界
+
+不要让同一个名称既表示用户输入又表示工具输出：
+
+~~~text
+正确：
+departure_date（user slot）
+flight_search（tool artifact）
+selected_flight_id（user slot，depends_on flight_search）
+cabin_quote（tool artifact）
+
+错误：
+flight_date 同时作为用户填写日期和工具返回日期
+~~~
+
+用户选择的 selected_flight_id 虽然是 user slot，但它依赖 flight_search。只要 flight_search 失效，selected_flight_id 也必须清除，因为它已经不再属于当前可选集合。
+
+### 3.5 依赖、缓存和安全边界
+
+inputs/outputs 编译出的依赖图决定“结果是否需要重算”；运行时 depends_on 决定某个缓存结果是否仍然对应当前输入版本；policies 决定是否因业务或安全原因额外撤销结果。这三者都必须检查，不能只看缓存是否存在。
+
+工具拥有的订单、支付状态、退款资格、身份认证等 artifact 不能由 Agent 或用户输入覆盖。用户只能修改 owner=user 且 mutable=true 的 slot；修改后由引擎重新产生可信 artifact。
+
+## 4. 通用节点字段
 
 每个节点必须有 `type`。节点 ID 只用于图内跳转，不是数据库 ID，也不应暴露给用户。
 
@@ -142,9 +267,9 @@ slots 不是“模型抽取到的所有信息”，而是 workflow 允许接受�
 
 `max_visits` 统计的是进入节点的次数，不是工具重试次数。工具的网络重试应由工具层处理；业务失败状态应通过 `transitions` 处理。
 
-## 4. 节点类型
+## 5. 节点类型
 
-### 4.1 `ask`：等待用户输入
+### 5.1 `ask`：等待用户输入
 
 ```json
 {
@@ -165,7 +290,7 @@ slots 不是“模型抽取到的所有信息”，而是 workflow 允许接受�
 
 `ask` 到达后，引擎将案件标为 `waiting_for_user` 并停止。下一条消息恢复案件，Harness 依据当前节点的 `collect` 提取字段。
 
-### 4.2 `branch`：确定性分支
+### 5.2 `branch`：确定性分支
 
 ```json
 {
@@ -186,7 +311,7 @@ slots 不是“模型抽取到的所有信息”，而是 workflow 允许接受�
 
 条件只能使用已经写入 `facts` 的值。工具没有返回 `order.channel` 时，`order.channel == 'apple'` 为假，流程会继续检查其他 case 或 `default`。
 
-### 4.3 `action`：受控工具操作
+### 5.3 `action`：受控工具操作
 
 ```json
 {
@@ -228,7 +353,7 @@ slots 不是“模型抽取到的所有信息”，而是 workflow 允许接受�
 
 `on_guard_failure` 与 `transitions.error` 的区别：前者表示“还没有资格调用工具”，后者表示“工具已经调用，但业务或服务返回失败”。
 
-### 4.4 `respond`：向用户说明结果
+### 5.4 `respond`：向用户说明结果
 
 ```json
 {
@@ -243,7 +368,7 @@ slots 不是“模型抽取到的所有信息”，而是 workflow 允许接受�
 | `template` | string | 面向用户的回复模板。模板只能引用 facts；“已提交”“已取消”等成功表述必须对应工具真实结果。 |
 | `next` | node ID | 可选。存在时先输出回复，再继续运行；省略时该回复结束本轮并将案件标为完成。 |
 
-### 4.5 `wait`：等待外部事件
+### 5.5 `wait`：等待外部事件
 
 ```json
 {"type": "wait", "event": "human_case_updated", "next": "report_human_result"}
@@ -254,134 +379,9 @@ slots 不是“模型抽取到的所有信息”，而是 workflow 允许接受�
 | `event` | string | 外部恢复事件的类型，例如人工审核完成。 |
 | `next` | node ID | 事件到达后恢复到的节点。当前 CLI 原型只持久化等待状态；生产实现需要事件入口。 |
 
-### 4.6 `end`：流程完成
+### 5.6 `end`：流程完成
 
 `end` 没有业务字段。引擎到达它时把案件状态设置为 `completed`。它只表示 workflow 结束，不表示退款一定成功；成功与否必须由前面的结果节点说明。
-
-## 5. artifacts：派生事实的完整规范
-
-artifact 是 workflow 执行产生的结果，不是用户原始输入。典型 artifact 包括航班搜索结果、报价、订单、退款资格和确认文案。静态定义只描述 artifact 的契约；真实值、来源和版本保存在动态 State.artifacts。
-
-### 5.1 artifact 定义
-
-~~~json
-{
-  "artifacts": {
-    "flight_search": {
-      "producer": "search_flights",
-      "owner": "tool",
-      "value_schema": "FlightSearchResult",
-      "cache": {
-        "enabled": true,
-        "ttl_seconds": 60
-      },
-      "retention": "case",
-      "sensitive": false
-    },
-    "cabin_quote": {
-      "producer": "quote_flight",
-      "owner": "tool",
-      "value_schema": "CabinQuote",
-      "cache": {
-        "enabled": false
-      },
-      "retention": "case",
-      "sensitive": false
-    }
-  }
-}
-~~~
-
-| 字段 | 必填 | 实际含义 |
-|---|---:|---|
-| artifact 名称 | 是 | 稳定的结果名称。名称不能同时被 slot 或另一个 producer 使用。 |
-| producer | 是 | 唯一产生该 artifact 的节点 ID。 |
-| owner | 是 | 通常为 tool 或 system。模型和用户不能直接写入 tool artifact。 |
-| value_schema | 是 | 结果结构的类型标识。工具返回的数据必须符合它。 |
-| cache.enabled | 否 | 是否允许复用历史结果。复用前必须检查依赖版本、TTL 和权限范围。 |
-| cache.ttl_seconds | 否 | 结果最多可复用多久；价格、库存等实时数据通常使用很短 TTL。 |
-| retention | 否 | 保存范围，例如 turn、case、audit 或 none。敏感值不能因为 cache 开启而长期保存。 |
-| sensitive | 否 | 是否需要加密、脱敏、最短保存和访问审计。 |
-
-### 5.2 artifact 的运行时状态
-
-工具成功后，State 中保存的不只是 value，还必须保存来源和依赖快照：
-
-~~~json
-{
-  "artifacts": {
-    "flight_search": {
-      "status": "valid",
-      "value": {
-        "flights": [{"id": "CA123", "price": 2100}]
-      },
-      "source": {
-        "kind": "tool",
-        "name": "flight.search",
-        "call_id": "call_72"
-      },
-      "revision": 3,
-      "depends_on": {
-        "origin": 1,
-        "destination": 1,
-        "departure_date": 2,
-        "cabin": 1
-      },
-      "created_at": "2026-09-19T10:00:00+08:00",
-      "expires_at": "2026-09-19T10:01:00+08:00"
-    }
-  }
-}
-~~~
-
-| 运行时字段 | 实际含义 |
-|---|---|
-| status | valid、stale、invalid、error 或 pending。invalid 的结果不能进入工具参数、分支或回复模板。 |
-| value | 工具返回的结构化业务数据，不应保存模型猜测的结果。 |
-| source | 产生结果的工具、调用 ID 或系统事件，用于审计和追责。 |
-| revision | 该 artifact 的版本，每次重新产生都递增。 |
-| depends_on | 产生它时各输入事实的 revision 快照。它是运行时血缘，不是静态字段值。 |
-| created_at / expires_at | 结果的时间边界，用于 TTL、价格和库存校验。 |
-
-### 5.3 artifact 生命周期
-
-一个 artifact 按以下状态流转：
-
-~~~text
-absent → pending → valid
-                   ├→ stale（上游版本改变或超过 TTL）
-                   ├→ invalid（业务策略主动撤销）
-                   └→ error（工具失败）
-~~~
-
-- action 开始前可以创建 pending，但 pending 不能满足后续 requires。
-- 工具成功且版本仍匹配时变为 valid。
-- 上游 slot 或 artifact 版本改变时变为 stale，并从可用上下文中移除。
-- policies 要求撤销时变为 invalid；invalid 需要重新执行指定验证或计算节点。
-- 工具失败时记录 error。是否重试由工具层或 transitions 决定，不能由模型自行重试写操作。
-
-### 5.4 artifact 和 slot 的边界
-
-不要让同一个名称既表示用户输入又表示工具输出：
-
-~~~text
-正确：
-departure_date（user slot）
-flight_search（tool artifact）
-selected_flight_id（user slot，depends_on flight_search）
-cabin_quote（tool artifact）
-
-错误：
-flight_date 同时作为用户填写日期和工具返回日期
-~~~
-
-用户选择的 selected_flight_id 虽然是 user slot，但它依赖 flight_search。只要 flight_search 失效，selected_flight_id 也必须清除，因为它已经不再属于当前可选集合。
-
-### 5.5 依赖、缓存和安全边界
-
-inputs/outputs 编译出的依赖图决定“结果是否需要重算”；运行时 depends_on 决定某个缓存结果是否仍然对应当前输入版本；policies 决定是否因业务或安全原因额外撤销结果。这三者都必须检查，不能只看缓存是否存在。
-
-工具拥有的订单、支付状态、退款资格、身份认证等 artifact 不能由 Agent 或用户输入覆盖。用户只能修改 owner=user 且 mutable=true 的 slot；修改后由引擎重新产生可信 artifact。
 
 ## 6. 用户修改和事实失效
 
@@ -560,7 +560,7 @@ Harness 负责把“改成明天”解析为结构化 patch：
 
 引擎还记录 `fact_sources` 和 `fact_revisions`：用户字段来源是 `user`，工具结果来源是 `tool:<name>`。只有用户拥有的 mutable input 可以被用户更正；工具拥有的订单、资格和成功状态不能被覆盖。
 
-### 机票例子
+### 6.5 机票例子
 
 ```text
 日期 9 月 19 日
