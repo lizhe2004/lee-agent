@@ -481,7 +481,7 @@ wait 专属字段：
 | on.received | node ID | 是 | 合法事件到达后的目标节点 |
 | on.timeout | node ID | 设置 timeout 时 | 等待超时后的目标节点 |
 
-不匹配的事件不得消费等待令牌。一个等待令牌成功恢复后必须失效，重复事件按幂等规则返回原处理结果。
+不匹配的事件不得关闭当前 wait。合法事件成功恢复后，该 wait 必须关闭；重复事件按幂等规则返回原处理结果。
 
 ### 5.7 call
 
@@ -823,7 +823,7 @@ requires 为 false 或 unknown 时，节点不得执行，并必须迁移到 on_
 
 ### 13.5 暂停与恢复
 
-ask 和 wait 产生等待令牌。恢复事件必须匹配实例、节点、事件类型和 correlation 信息。过期等待令牌不得恢复已被重新执行替代的节点。
+ask 产生唯一 `interaction_id`；wait 记录事件类型、来源和 correlation 信息。恢复输入必须匹配当前实例中的活动等待。已关闭或已被重新执行替代的 ask、wait 不得再次恢复流程。
 
 ## 14. Slot 修改与重新计算
 
@@ -837,13 +837,13 @@ Slot 修改不是“当前 ask 的异常答案”，而是 Workflow Instance 可
   "changes": {
     "slots.departure_date": "2026-09-20"
   },
-  "expected_revisions": {
+  "expected_slot_revisions": {
     "slots.departure_date": 4
   }
 }
 ~~~
 
-expected_revisions 用于避免并发覆盖。
+expected_slot_revisions 用于避免并发覆盖。
 
 ### 14.2 修改事务
 
@@ -858,7 +858,7 @@ Engine 必须按以下顺序处理：
 7. 计算依赖失效；
 8. 执行匹配 policies；
 9. 计算重新执行计划；
-10. 撤销过期等待令牌并恢复执行。
+10. 关闭受影响的 pending interaction 或 wait，并恢复执行。
 
 同一事件中的多个 changes 必须作为一个原子修改集合处理，不能逐个回退流程。
 
@@ -979,7 +979,7 @@ idempotency_key 引用的数据必须包含在 node.inputs 或 context 允许字
 
 ### 15.4 恢复
 
-实例恢复时必须根据已提交事件、幂等键和等待令牌继续。Engine 不得因为进程重启重复执行已提交副作用。
+实例恢复时必须根据已提交事件、幂等键、活动 `interaction_id` 和 wait correlation 状态继续。Engine 不得因为进程重启重复执行已提交副作用。
 
 ## 16. Policy 执行
 

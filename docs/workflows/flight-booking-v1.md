@@ -33,7 +33,7 @@ Workflow Definition 不声明 `new_intent`，也不通过节点上的 `intent_ro
 
 ~~~json
 {
-  "interpretation_version": "0.2",
+  "interpretation_version": "0.3",
   "utterance_id": "msg_mixed",
   "language": "zh-CN",
   "interaction_acts": [
@@ -89,7 +89,7 @@ Harness 向 Engine 提交的核心 Command：
 {
   "type": "slot.change",
   "workflow_instance_id": "wfi_booking_001",
-  "expected_revision": 7,
+  "expected_instance_revision": 7,
   "payload": {
     "changes": {
       "slots.departure_date": "2026-09-20"
@@ -133,7 +133,7 @@ Definition 是带版本的静态配置；每次订票创建独立的 Workflow In
 - 当前 revision 和生命周期状态；
 - Slot 当前值、Slot revision 和有效性；
 - Artifact 当前值、血缘和有效性；
-- 当前等待的 interaction 和 wait_token；
+- 当前等待的 interaction 和 interaction_id；
 - 已请求或已提交的副作用；
 - 审计和幂等记录。
 

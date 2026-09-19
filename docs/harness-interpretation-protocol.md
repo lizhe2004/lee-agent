@@ -1,7 +1,7 @@
 # Harness Interpretation 协议
 
 状态：Draft
-协议版本：0.2.0
+协议版本：0.3.0
 
 本文定义 Harness 如何向语言模型提供受约束的理解上下文、语言模型必须返回什么结构，以及 Harness 如何把不可信的语义候选校验为 Workflow Engine Command 或 Intent Router Request。
 
@@ -82,7 +82,7 @@
 - 当前 ask 的 fields 和 options；
 - Intent Catalog；
 - Slot source 和 mutable；
-- revision 和 wait_token；
+- revision 和 interaction_id；
 - 身份认证、授权和业务 Policy；
 - Router 对活动 Workflow 的判断。
 
@@ -104,9 +104,9 @@
 ~~~text
 workflow_id
 workflow_instance_id
-expected_revision
+expected_instance_revision
 expected_slot_revisions
-wait_token
+interaction_id
 actor
 command_id
 Artifact 值
@@ -147,7 +147,7 @@ Workflow Engine：
 - 不接收模型原始输出；
 - 不信任模型置信度；
 - 只接收符合 Engine 协议的 Command；
-- 再次校验权限、状态、revision、wait_token 和 Policy；
+- 再次校验权限、状态、revision、interaction_id 和 Policy；
 - 根据 Workflow 数据依赖处理 Slot 修改后的级联失效和重算。
 
 ### 2.4 Intent Router
@@ -221,7 +221,7 @@ Ambiguity 表示某个值、指代、动作或意图存在多个合理解释，�
 
 ~~~json
 {
-  "interpretation_version": "0.2",
+  "interpretation_version": "0.3",
   "utterance": {
     "id": "msg_123",
     "text": "改成明天吧，另外把自动续费也关了",
@@ -245,9 +245,7 @@ Ambiguity 表示某个值、指代、动作或意图存在多个合理解释，�
     ],
     "relevant_turns": []
   },
-  "current_interaction": {
-    "node_id": "confirm_booking",
-    "wait_token_alias": "current",
+  "pending_interaction": {
     "kind": "confirmation",
     "prompt": "请确认航班和价格",
     "fields": ["slots.booking_confirmed"],
@@ -295,7 +293,7 @@ Ambiguity 表示某个值、指代、动作或意图存在多个合理解释，�
 | timezone | 日期时间场景 | 相对日期时间解释使用的时区 |
 | reference_time | 日期时间场景 | “今天”“明天”等表达的唯一基准时间 |
 | conversation_context | 否 | 经过裁剪的历史对话和摘要 |
-| current_interaction | 有活动 ask 时 | 当前 `interaction.requested` 的裁剪视图 |
+| pending_interaction | 有活动 ask 时 | 当前 `interaction.requested` 的裁剪视图 |
 | allowed_interaction_acts | 是 | 本轮允许模型输出的 Interaction Act 类型 |
 | allowed_slots | 是 | 模型允许回答或修改的 Slot 白名单与类型摘要 |
 | intent_catalog | 是 | 模型可识别的稳定 Business Intent 目录，可为空 |
@@ -400,19 +398,19 @@ Harness 应：
 - 避免在 summary 和原始 turns 中重复大量相同内容；
 - 记录上下文版本或 hash，便于审计和重放。
 
-## 6. current_interaction 与 allowed_slots
+## 6. pending_interaction 与 allowed_slots
 
-### 6.1 current_interaction
+### 6.1 pending_interaction
 
-`current_interaction` 来自 Engine 的 `interaction.requested`。Harness 可以删除敏感展示信息，但不得改变：
+`pending_interaction` 是 Harness 从 Engine 的 `interaction.requested` 构造的语义视图。它只包含模型理解当前用户消息需要的信息：
 
-- `node_id`；
 - `kind`；
+- `prompt`；
 - `fields`；
 - `options[].value`；
 - 当前允许的交互行为。
 
-`wait_token_alias` 只表示“当前等待”，不包含真实 `wait_token`。真实 token 不应提供给模型。
+Harness 必须在自己的可信上下文中保存 `workflow_instance_id`、`interaction_id`、`node_id` 和 `expected_instance_revision`。这些控制字段不得放入 `pending_interaction`，模型也不得返回它们。
 
 Workflow Definition 中 `request.accepts` 声明的是 Engine 交互事件。Harness 构造 `allowed_interaction_acts` 时执行固定映射：`answer` 对应模型 Act `answer`，`cancel` 对应模型 Act `cancel_interaction`。该映射由协议代码定义，不能交给模型猜测。
 
@@ -492,7 +490,7 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 
 ~~~json
 {
-  "interpretation_version": "0.2",
+  "interpretation_version": "0.3",
   "utterance_id": "msg_123",
   "language": "zh-CN",
   "interaction_acts": [],
@@ -588,13 +586,13 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 |---|---:|---|
 | type | 是 | 固定为 `answer` |
 | answers | 是 | 至少一个回答项 |
-| answers[].ref | 是 | `current_interaction.fields` 中的 Slot |
+| answers[].ref | 是 | `pending_interaction.fields` 中的 Slot |
 | answers[].raw_value | 是 | 用户原始表达 |
 | answers[].candidate_value | 是 | 与 Slot 类型匹配的候选值 |
 | answers[].confidence | 是 | 模型置信度 |
 | answers[].evidence | 应有 | 原文证据 |
 
-`answer` 只能回答当前 ask，不能顺便写入其他 Slot。选项型回答必须匹配 `current_interaction.options[].value`。
+`answer` 只能回答当前 ask，不能顺便写入其他 Slot。选项型回答必须匹配 `pending_interaction.options[].value`。
 
 ### 10.2 slot_change
 
@@ -749,7 +747,7 @@ Engine Command value
 
 - enum 候选必须属于 Slot 的 `values`；
 - “确认”“是”“就这个”只能在当前 confirmation 上下文中映射为 `true`；
-- selection 必须来自 `current_interaction.options[].value`；
+- selection 必须来自 `pending_interaction.options[].value`；
 - 脱离当前 ask 的肯定表达不能自动解释为业务确认。
 
 ### 13.3 Money、Phone 和 Email
@@ -816,7 +814,7 @@ Harness 必须按以下顺序处理模型输出。
 ### 15.2 白名单与引用校验
 
 - 每个 Interaction Act 都在 `allowed_interaction_acts`；
-- `answer.ref` 属于 `current_interaction.fields`；
+- `answer.ref` 属于 `pending_interaction.fields`；
 - `slot_change.ref` 属于 `allowed_slots`；
 - `business_intents[].intent` 属于 `intent_catalog[].id`；
 - entities 只包含对应 Intent 的 `allowed_entities`；
@@ -836,7 +834,7 @@ Harness 必须按以下顺序处理模型输出。
 - 候选值可转换为 Slot 类型；
 - enum 和 selection 在允许集合中；
 - 日期使用正确的 reference time 和 timezone；
-- 当前 wait_token 仍有效；
+- 当前 interaction_id 仍有效；
 - 当前 ask 没有被新 Emission 替代；
 - Slot 仍然 mutable；
 - actor 仍然有权写入；
@@ -848,7 +846,7 @@ Harness 必须按以下顺序处理模型输出。
 
 - Interaction Act 从可信上下文补充执行字段，编译为 Engine Command；
 - Business Intent 和 Unmapped Request 补充 actor、tenant、channel 和 utterance ID，编译为 Router Request；
-- Ambiguity 编译为澄清请求，不改变 revision，也不消费 wait_token。
+- Ambiguity 编译为澄清请求，不改变 revision，也不关闭当前 pending interaction。
 
 ## 16. Interpretation 到 Engine Command
 
@@ -857,8 +855,8 @@ Harness 必须按以下顺序处理模型输出。
 ~~~text
 Interpretation answer
   + 当前 workflow_instance_id
-  + 当前 expected_revision
-  + 当前 wait_token
+  + 当前 expected_instance_revision
+  + 当前 interaction_id
   + 认证 actor
   → interaction.answer
 ~~~
@@ -868,8 +866,8 @@ Interpretation answer
 | `answers[].ref` | `payload.answers` 的 key |
 | 规范化后的 candidate value | `payload.answers` 的 value |
 | 无 | `command_id`，由 Harness 生成 |
-| 无 | `wait_token`，从 Engine Emission 取得 |
-| 无 | `expected_revision`，从 Engine State 取得 |
+| 无 | `interaction_id`，从 Engine Emission 取得 |
+| 无 | `expected_instance_revision`，从 Engine State 取得 |
 
 ### 16.2 slot_change
 
@@ -886,7 +884,7 @@ Interpretation slot_change
 
 ### 16.3 cancel_interaction
 
-`cancel_interaction` 编译为 `interaction.cancel`，并从当前 Engine Emission 取得 `wait_token` 和 `node_id`。
+`cancel_interaction` 编译为 `interaction.cancel`，并从当前 Engine Emission 取得 `interaction_id`。Engine 根据该 ID 找到对应的节点和等待状态。
 
 ## 17. Harness 到 Intent Router 的交接
 
@@ -993,11 +991,11 @@ Router Decision 不能反向写入 Interpretation Result，也不能由模型预
   "utterance_id": "msg_123",
   "commands": [
     {
-      "protocol_version": "0.1",
+      "protocol_version": "0.2",
       "command_id": "cmd_456",
       "type": "slot.change",
       "workflow_instance_id": "wfi_789",
-      "expected_revision": 18,
+      "expected_instance_revision": 18,
       "actor": {
         "type": "user",
         "id": "user_123",
@@ -1117,7 +1115,7 @@ Harness 最终输出不是模型原始 JSON，而是经过校验、冲突处理�
 - 可以用同一 Request 重试模型，但重试次数必须受限；
 - 重试后仍失败时应澄清或转人工；
 - 重新读取 Engine 状态后必须构造新的 Request；
-- 旧 Interpretation Result 不得绑定到新的 wait_token 或 revision；
+- 旧 Interpretation Result 不得绑定到新的 `interaction_id` 或实例 revision；
 - 不得通过降低权限或证据校验提高成功率；
 - Catalog 未命中必须形成 Unmapped Request，不能静默丢弃。
 
@@ -1164,7 +1162,7 @@ Harness 应记录协议版本、utterance ID、模型别名、Prompt 版本、co
 
 ~~~json
 {
-  "interpretation_version": "0.2",
+  "interpretation_version": "0.3",
   "utterance_id": "msg_202",
   "language": "zh-CN",
   "interaction_acts": [
@@ -1192,7 +1190,7 @@ Harness 应记录协议版本、utterance ID、模型别名、Prompt 版本、co
 }
 ~~~
 
-历史对话确定“确认”回答的对象。真正可确认的字段、选项和 wait_token 仍来自 current interaction 和 Engine State。
+历史对话确定“确认”回答的对象。可回答的字段和选项来自 `pending_interaction`；真实 `interaction_id` 只保存在 Harness 的可信上下文和 Engine State 中。
 
 ### 21.2 确认阶段修改日期
 
@@ -1200,7 +1198,7 @@ Harness 应记录协议版本、utterance ID、模型别名、Prompt 版本、co
 
 ~~~json
 {
-  "interpretation_version": "0.2",
+  "interpretation_version": "0.3",
   "utterance_id": "msg_change_date",
   "language": "zh-CN",
   "interaction_acts": [
@@ -1236,7 +1234,7 @@ Harness 编译一个 `slot.change`。模型不指定跳回 `search_flights`。En
 
 ~~~json
 {
-  "interpretation_version": "0.2",
+  "interpretation_version": "0.3",
   "utterance_id": "msg_mixed",
   "language": "zh-CN",
   "interaction_acts": [
@@ -1284,7 +1282,7 @@ Harness 分别生成当前机票 Workflow 的 Engine Command 和 `cancel_auto_re
 
 ~~~json
 {
-  "interpretation_version": "0.2",
+  "interpretation_version": "0.3",
   "utterance_id": "msg_refund",
   "language": "zh-CN",
   "interaction_acts": [],
@@ -1323,7 +1321,7 @@ Intent Catalog 中没有信用卡申请，用户说“帮我申请一张信用�
 
 ~~~json
 {
-  "interpretation_version": "0.2",
+  "interpretation_version": "0.3",
   "utterance_id": "msg_unmapped",
   "language": "zh-CN",
   "interaction_acts": [],
@@ -1352,7 +1350,7 @@ Router 或能力发现组件查询完整目录后，才决定启动某项能力�
 
 ~~~json
 {
-  "interpretation_version": "0.2",
+  "interpretation_version": "0.3",
   "utterance_id": "msg_ambiguous",
   "language": "zh-CN",
   "interaction_acts": [],
@@ -1371,7 +1369,7 @@ Router 或能力发现组件查询完整目录后，才决定启动某项能力�
 }
 ~~~
 
-Harness 不产生 Engine Command，并保持当前 wait_token 有效。
+Harness 不产生 Engine Command，Engine 中当前 pending interaction 保持有效。
 
 ### 21.7 模型尝试写 Artifact
 
@@ -1379,7 +1377,7 @@ Harness 不产生 Engine Command，并保持当前 wait_token 有效。
 
 ~~~json
 {
-  "interpretation_version": "0.2",
+  "interpretation_version": "0.3",
   "utterance_id": "msg_attack",
   "language": "zh-CN",
   "interaction_acts": [
@@ -1422,9 +1420,9 @@ Harness 必须返回 `DISALLOWED_SLOT`，不产生 Engine Command。
 command_id
 workflow_id
 workflow_instance_id
-expected_revision
+expected_instance_revision
 expected_slot_revisions
-wait_token
+interaction_id
 actor
 current_node
 next_node

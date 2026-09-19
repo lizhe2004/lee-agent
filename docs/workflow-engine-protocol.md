@@ -1,7 +1,7 @@
 # Workflow Engine 交互协议
 
 状态：Draft
-协议版本：0.1.0
+协议版本：0.2.0
 
 本文定义外部组件与 Workflow Engine 之间的结构化交互协议。协议独立于 HTTP、消息队列、RPC 和进程内调用，可用于 CLI、服务化部署和异步执行环境。
 
@@ -72,7 +72,7 @@ Workflow Engine
 Harness 负责：
 
 - 将用户消息解释为 interaction.answer、slot.change 或 interaction.cancel；
-- 保存并回传 Engine 发出的 wait_token；
+- 保存并回传 Engine 发出的 interaction_id；
 - 将 interaction.requested 和 response.produced 转换成用户可理解的内容；
 - 附带真实 actor、channel 和 trace 信息。
 
@@ -83,7 +83,7 @@ Harness 不得：
 - 伪造 tool.result；
 - 指定 Workflow 跳转目标；
 - 计算或覆盖失效范围；
-- 绕过 expected_revision；
+- 绕过 expected_instance_revision；
 - 修改 Engine 发出的业务结果。
 
 ### 2.3 Tool Executor
@@ -156,11 +156,11 @@ new_state、decision 和 emissions 必须在同一个逻辑事务中提交。
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "command_id": "cmd_01J7Y8F1",
   "type": "slot.change",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
-  "expected_revision": 18,
+  "expected_instance_revision": 18,
   "actor": {
     "type": "user",
     "id": "user_123",
@@ -183,7 +183,7 @@ new_state、decision 和 emissions 必须在同一个逻辑事务中提交。
 | command_id | string | 是 | 全局唯一幂等键 |
 | type | command-type | 是 | Command 类型 |
 | workflow_instance_id | string | 除 workflow.start 外 | 目标实例 ID |
-| expected_revision | integer | 用户交互和主动修改既有实例时 | 调用方预期的实例 revision |
+| expected_instance_revision | integer | 用户交互和主动修改既有实例时 | 调用方预期的实例 revision |
 | actor | object | 是 | 发起主体 |
 | trace | object | 否 | 链路追踪信息 |
 | occurred_at | datetime | 是 | 事件在来源系统发生的时间 |
@@ -212,13 +212,13 @@ Command 的实际发送组件身份必须来自经过认证的传输上下文，
 
 trace 不参与 Workflow 业务判断。
 
-### 4.5 expected_revision
+### 4.5 expected_instance_revision
 
-expected_revision 用于乐观并发控制。它与 Engine 当前实例 revision 不一致时，Command 不得修改状态，Decision 返回 conflict。
+expected_instance_revision 用于乐观并发控制。它与 Engine 当前实例 revision 不一致时，Command 不得修改状态，Decision 返回 conflict。
 
-interaction.answer、interaction.cancel、slot.change 和 workflow.cancel 必须提供 expected_revision。
+interaction.answer、interaction.cancel、slot.change 和 workflow.cancel 必须提供 expected_instance_revision。
 
-tool.result、timer.fired、external.event 和 subworkflow.result MAY 省略 expected_revision，因为异步发送方不一定知道实例的最新 revision；它们必须通过 invocation_id、timer_id、correlation_key 或 call_id 对当前活动等待做 compare-and-set。若同时提供 expected_revision，则 Engine 也必须校验。关联令牌过期时，即使 revision 匹配也必须拒绝。
+tool.result、timer.fired、external.event 和 subworkflow.result MAY 省略 expected_instance_revision，因为异步发送方不一定知道实例的最新 revision；它们必须通过 invocation_id、timer_id、correlation_key 或 call_id 对当前活动等待做 compare-and-set。若同时提供 expected_instance_revision，则 Engine 也必须校验。关联 ID 过期时，即使 revision 匹配也必须拒绝。
 
 ### 4.6 Command 幂等
 
@@ -235,7 +235,7 @@ tool.result、timer.fired、external.event 和 subworkflow.result MAY 省略 exp
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "command_id": "cmd_start_001",
   "type": "workflow.start",
   "actor": {
@@ -275,11 +275,11 @@ Engine 必须验证 initial_slots 的类型、source 和权限。调用方不得
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "command_id": "cmd_cancel_001",
   "type": "workflow.cancel",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
-  "expected_revision": 27,
+  "expected_instance_revision": 27,
   "actor": {
     "type": "operator",
     "id": "op_42",
@@ -308,11 +308,11 @@ graceful cancel 必须遵守 Workflow 中的副作用和补偿规则。协议不
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "command_id": "cmd_answer_001",
   "type": "interaction.answer",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
-  "expected_revision": 8,
+  "expected_instance_revision": 8,
   "actor": {
     "type": "user",
     "id": "user_123",
@@ -320,8 +320,7 @@ graceful cancel 必须遵守 Workflow 中的副作用和补偿规则。协议不
   },
   "occurred_at": "2026-09-19T10:01:00+08:00",
   "payload": {
-    "wait_token": "wait_abc",
-    "node_id": "select_flight",
+    "interaction_id": "int_abc",
     "answers": {
       "slots.selected_flight_id": "CA123"
     }
@@ -331,19 +330,17 @@ graceful cancel 必须遵守 Workflow 中的副作用和补偿规则。协议不
 
 | payload 字段 | 必填 | 含义 |
 |---|---:|---|
-| wait_token | 是 | interaction.requested 发出的单次等待令牌 |
-| node_id | 是 | 等待中的 ask node |
+| interaction_id | 是 | `interaction.requested` 发出的本次交互唯一 ID |
 | answers | 是 | Slot 引用到规范化值的映射 |
 
 Engine 必须验证：
 
-- wait_token 当前有效；
-- node_id 与等待节点一致；
+- interaction_id 当前有效；
 - answers 只包含 ask.request.fields；
 - Slot source 允许当前 actor；
 - 值符合 Slot 类型；
 - 选项仍属于当前 valid options_from；
-- wait_token 未被 Slot 修改或重算撤销。
+- interaction_id 未被 Slot 修改或重算撤销。
 
 ### 6.2 interaction.cancel
 
@@ -351,11 +348,11 @@ Engine 必须验证：
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "command_id": "cmd_interaction_cancel_001",
   "type": "interaction.cancel",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
-  "expected_revision": 8,
+  "expected_instance_revision": 8,
   "actor": {
     "type": "user",
     "id": "user_123",
@@ -363,8 +360,7 @@ Engine 必须验证：
   },
   "occurred_at": "2026-09-19T10:01:00+08:00",
   "payload": {
-    "wait_token": "wait_abc",
-    "node_id": "select_flight",
+    "interaction_id": "int_abc",
     "reason": "user_cancelled"
   }
 }
@@ -380,11 +376,11 @@ slot.change 在实例尚未终止时修改一个或多个既有 Slot。它不表
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "command_id": "cmd_slot_change_001",
   "type": "slot.change",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
-  "expected_revision": 18,
+  "expected_instance_revision": 18,
   "actor": {
     "type": "user",
     "id": "user_123",
@@ -446,11 +442,11 @@ Tool Executor 使用 tool.result 返回 tool.requested 的执行结果。
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "command_id": "cmd_tool_result_001",
   "type": "tool.result",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
-  "expected_revision": 10,
+  "expected_instance_revision": 10,
   "actor": {
     "type": "tool",
     "id": "flight_search_executor",
@@ -492,11 +488,11 @@ Tool Executor 不得提交 transition、Artifact 名称或下一节点。
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "command_id": "cmd_timer_001",
   "type": "timer.fired",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
-  "expected_revision": 12,
+  "expected_instance_revision": 12,
   "actor": {
     "type": "timer",
     "id": "timer_service",
@@ -516,11 +512,11 @@ Timer Service 不得决定 timeout transition。Engine 根据 timer_id 对应的
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "command_id": "cmd_event_001",
   "type": "external.event",
   "workflow_instance_id": "wfi_refund_001",
-  "expected_revision": 23,
+  "expected_instance_revision": 23,
   "actor": {
     "type": "event_source",
     "id": "refund_review_service",
@@ -552,11 +548,11 @@ Timer Service 不得决定 timeout transition。Engine 根据 timer_id 对应的
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "command_id": "cmd_child_result_001",
   "type": "subworkflow.result",
   "workflow_instance_id": "wfi_parent_001",
-  "expected_revision": 14,
+  "expected_instance_revision": 14,
   "actor": {
     "type": "workflow",
     "id": "wfi_child_001",
@@ -582,12 +578,12 @@ Timer Service 不得决定 timeout transition。Engine 根据 timer_id 对应的
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "command_id": "cmd_slot_change_001",
   "status": "accepted",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
-  "previous_revision": 18,
-  "current_revision": 19,
+  "previous_instance_revision": 18,
+  "current_instance_revision": 19,
   "execution_status": "waiting",
   "outcome": null,
   "change_summary": null,
@@ -602,8 +598,8 @@ Timer Service 不得决定 timeout transition。Engine 根据 timer_id 对应的
 | command_id | 是 | 对应 Command |
 | status | 是 | accepted、rejected、conflict、duplicate、failed |
 | workflow_instance_id | start 成功后或既有实例时 | 实例 ID |
-| previous_revision | 既有实例时 | 处理前 revision |
-| current_revision | 有实例时 | 处理后 revision |
+| previous_instance_revision | 既有实例时 | 处理前 revision |
+| current_instance_revision | 有实例时 | 处理后 revision |
 | execution_status | 有实例时 | running、waiting、completed、cancelled、failed |
 | outcome | 终止时 | Definition end.outcome |
 | change_summary | slot.change 时可选 | 失效和重算摘要 |
@@ -616,7 +612,7 @@ Timer Service 不得决定 timeout transition。Engine 根据 timer_id 对应的
 |---|---|---:|
 | accepted | Command 已处理 | 可能 |
 | rejected | Command 合法但不符合当前业务或状态约束 | 否 |
-| conflict | expected_revision 不匹配 | 否 |
+| conflict | expected_instance_revision 不匹配 | 否 |
 | duplicate | command_id 已处理；返回原 revision 和原 Emission ID | 否 |
 | failed | Engine 在提交前发生不可恢复错误 | 否 |
 
@@ -628,7 +624,7 @@ accepted 不代表业务成功，只代表 Command 已被 Engine 接受并确定
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "emission_id": "em_01J7Y900",
   "type": "interaction.requested",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
@@ -636,7 +632,21 @@ accepted 不代表业务成功，只代表 Command 已被 Engine 接受并确定
   "sequence": 31,
   "caused_by_command_id": "cmd_slot_change_001",
   "created_at": "2026-09-19T10:03:00+08:00",
-  "payload": {}
+  "payload": {
+    "interaction_id": "int_01J7Y901",
+    "node_id": "collect_trip",
+    "request": {
+      "kind": "text",
+      "prompt": "请提供出发信息",
+      "fields": ["slots.origin"],
+      "options": []
+    },
+    "accepted_commands": [
+      "interaction.answer",
+      "interaction.cancel",
+      "slot.change"
+    ]
+  }
 }
 ~~~
 
@@ -662,7 +672,7 @@ accepted 不代表业务成功，只代表 Command 已被 Engine 接受并确定
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "emission_id": "em_interaction_001",
   "type": "interaction.requested",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
@@ -671,7 +681,7 @@ accepted 不代表业务成功，只代表 Command 已被 Engine 接受并确定
   "caused_by_command_id": "cmd_slot_change_001",
   "created_at": "2026-09-19T10:03:00+08:00",
   "payload": {
-    "wait_token": "wait_select_002",
+    "interaction_id": "int_select_002",
     "node_id": "select_flight",
     "request": {
       "kind": "selection",
@@ -695,7 +705,7 @@ accepted 不代表业务成功，只代表 Command 已被 Engine 接受并确定
 
 | payload 字段 | 含义 |
 |---|---|
-| wait_token | 单次等待令牌；节点重算后必须更换 |
+| interaction_id | 本次交互的唯一 ID；重新发起 ask 时必须生成新值 |
 | node_id | 当前 ask node |
 | request | 已根据 valid State 解析的请求 |
 | request.kind | form、selection、confirmation、text |
@@ -706,11 +716,20 @@ accepted 不代表业务成功，只代表 Command 已被 Engine 接受并确定
 
 Harness 可以调整渠道展示形式，但不得改变 fields、options.value、accepted_commands 或业务含义。
 
+`interaction_id` 的生命周期规则：
+
+- 每次产生 `interaction.requested` 都必须生成新的 ID，包括同一 ask 节点重新执行；
+- ID 在回答、取消、上游修改导致的失效或实例终止后不再有效；
+- Engine 必须拒绝引用已关闭或已替代 ID 的 Command；
+- 使用同一 `command_id` 重试已经成功处理的 Command 时，仍按 Command 幂等规则返回原 Decision；
+- ID 用于精确关联一次交互，不是身份认证凭证；
+- Harness 保存真实 ID，但不把它发送给语言模型。
+
 ### 12.2 response.produced
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "emission_id": "em_response_001",
   "type": "response.produced",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
@@ -735,7 +754,7 @@ Harness 可以本地化 message，但不得把失败结果改写为成功，也�
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "emission_id": "em_tool_001",
   "type": "tool.requested",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
@@ -783,7 +802,7 @@ Tool Executor 不得修改 arguments。需要重试时，由 Engine 根据 retry
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "emission_id": "em_timer_001",
   "type": "timer.requested",
   "workflow_instance_id": "wfi_refund_001",
@@ -808,7 +827,7 @@ Tool Executor 不得修改 arguments。需要重试时，由 Engine 根据 retry
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "emission_id": "em_child_001",
   "type": "subworkflow.requested",
   "workflow_instance_id": "wfi_parent_001",
@@ -842,7 +861,7 @@ Subworkflow Runner 必须使用 call_id 作为父子调用幂等键。
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "emission_id": "em_completed_001",
   "type": "workflow.completed",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
@@ -875,7 +894,7 @@ Subworkflow Runner 必须使用 call_id 作为父子调用幂等键。
 
 ~~~json
 {
-  "protocol_version": "0.1",
+  "protocol_version": "0.2",
   "emission_id": "em_invalidated_001",
   "type": "state.invalidated",
   "workflow_instance_id": "wfi_01J7Y7ZZ",
@@ -932,7 +951,7 @@ Emissions / Outbox
 
 同一 Workflow Instance 的 Command 必须串行提交。实现可以并发接收，但最终只能有一个 Command 成功更新某个 revision。
 
-异步工具结果、Timer 和外部事件可能乱序到达，Engine 必须依靠 revision、wait_token、invocation_id、timer_id 和 correlation key 判定是否仍然有效。
+用户回答、异步工具结果、Timer 和外部事件可能乱序到达。Engine 必须分别依靠 `interaction_id`、`invocation_id`、`timer_id`、correlation key 和可用的 instance revision 判定是否仍然有效。
 
 ### 15.4 Emission 拉取与恢复
 
@@ -962,8 +981,8 @@ Emissions / Outbox
   "message": "Workflow instance revision does not match.",
   "retryable": true,
   "details": {
-    "expected_revision": 18,
-    "current_revision": 19
+    "expected_instance_revision": 18,
+    "current_instance_revision": 19
   }
 }
 ~~~
@@ -987,9 +1006,9 @@ Emissions / Outbox
 | WORKFLOW_VERSION_NOT_FOUND | rejected | 准确版本不存在 |
 | INSTANCE_NOT_FOUND | rejected | 实例不存在或不可见 |
 | INSTANCE_TERMINAL | rejected | 实例已经终止 |
-| REVISION_CONFLICT | conflict | expected_revision 不匹配 |
+| REVISION_CONFLICT | conflict | expected_instance_revision 不匹配 |
 | UNAUTHORIZED_COMMAND | rejected | actor 无权发送该 Command |
-| INVALID_WAIT_TOKEN | rejected | wait_token 不存在或已过期 |
+| INVALID_INTERACTION_ID | rejected | interaction_id 不存在或已过期 |
 | INVALID_SLOT | rejected | Slot 不存在或不能修改 |
 | SLOT_REVISION_CONFLICT | conflict | Slot revision 不匹配 |
 | SLOT_VALUE_INVALID | rejected | Slot 值不符合类型或约束 |
@@ -1013,7 +1032,7 @@ Emissions / Outbox
 
 ### 18.1 信任边界
 
-Harness 是非可信业务输入适配器。即使 Harness 使用 LLM，Engine 仍必须验证所有 Slot、revision、wait_token 和权限。Engine 必须从认证传输上下文识别发送组件，再校验其是否可以代表 payload.actor。
+Harness 是非可信业务输入适配器。即使 Harness 使用 LLM，Engine 仍必须验证所有 Slot、revision、interaction_id 和权限。Engine 必须从认证传输上下文识别发送组件，再校验其是否可以代表 payload.actor。
 
 Tool Executor、Timer 和 Event Adapter 是受认证服务，但其 payload 仍必须通过合同校验。
 
@@ -1036,7 +1055,7 @@ Tool Executor、Timer 和 Event Adapter 是受认证服务，但其 payload 仍�
 
 ### 18.4 防重放
 
-实现必须校验 command_id、event_id、wait_token、invocation_id、timer_id、时间窗口和 actor。跨租户复用任何关联 ID 必须被拒绝。
+实现必须校验 command_id、event_id、interaction_id、invocation_id、timer_id、时间窗口和 actor。跨租户复用任何关联 ID 必须被拒绝。
 
 ## 19. 协议版本与兼容性
 
@@ -1061,7 +1080,7 @@ Harness
   → workflow.start
 Engine
   → Decision accepted, revision 1
-  → interaction.requested(wait_token=wait_trip)
+  → interaction.requested(interaction_id=int_trip)
 Harness
   → 向用户询问出发地、目的地、日期和舱位
 ~~~
@@ -1070,7 +1089,7 @@ Harness
 
 ~~~text
 Harness
-  → interaction.answer(wait_trip, slots...)
+  → interaction.answer(int_trip, slots...)
 Engine
   → Decision accepted, revision 2
   → tool.requested(invocation_id=inv_search)
@@ -1078,7 +1097,7 @@ Tool Executor
   → tool.result(inv_search, success, flights)
 Engine
   → Decision accepted, revision 3
-  → interaction.requested(wait_token=wait_select)
+  → interaction.requested(interaction_id=int_select)
 ~~~
 
 ### 20.3 确认时修改日期
@@ -1087,11 +1106,11 @@ Engine
 当前状态：
   node = confirm_booking
   revision = 18
-  wait_token = wait_confirm
+  interaction_id = int_confirm
 
 Harness
   → slot.change(
-      expected_revision=18,
+      expected_instance_revision=18,
       departure_date=2026-09-20
     )
 
@@ -1101,7 +1120,7 @@ Engine 原子处理：
   selected_flight_id stale
   cabin_quote stale
   booking_confirmed invalid
-  wait_confirm 撤销
+  int_confirm 撤销
   recompute_frontier = search_flights
 
 Engine
@@ -1115,11 +1134,11 @@ Tool Executor
 Engine
   → interaction.requested(
       node=select_flight,
-      wait_token=wait_select_2
+      interaction_id=int_select_2
     )
 ~~~
 
-如果旧 wait_confirm 随后提交 interaction.answer，Engine 必须返回 INVALID_WAIT_TOKEN。
+如果旧 int_confirm 随后提交 interaction.answer，Engine 必须返回 INVALID_INTERACTION_ID。
 
 ### 20.4 异步人工审核
 
@@ -1137,7 +1156,7 @@ Engine
 
 Engine 原子处理：
   写入审核 Artifact
-  撤销等待令牌
+  关闭人工审核等待状态
   产生 timer.cancelled
   继续后续节点
 ~~~
@@ -1148,10 +1167,10 @@ Engine 原子处理：
 Harness A 读取 revision 20
 Harness B 读取 revision 20
 
-A → slot.change(expected_revision=20)
-Engine → accepted, current_revision=21
+A → slot.change(expected_instance_revision=20)
+Engine → accepted, current_instance_revision=21
 
-B → interaction.answer(expected_revision=20)
+B → interaction.answer(expected_instance_revision=20)
 Engine → conflict, REVISION_CONFLICT
 ~~~
 
@@ -1164,8 +1183,8 @@ B 必须重新读取 pending interaction 或最新 Emission，不能自动把旧
 | Command | 核心关联字段 | 主要发送方 |
 |---|---|---|
 | workflow.start | start_key | Harness、业务系统、Subworkflow Runner |
-| interaction.answer | wait_token | Harness |
-| interaction.cancel | wait_token | Harness |
+| interaction.answer | interaction_id | Harness |
+| interaction.cancel | interaction_id | Harness |
 | slot.change | expected_slot_revisions | Harness、可信业务系统 |
 | tool.result | invocation_id | Tool Executor |
 | timer.fired | timer_id | Timer Service |
