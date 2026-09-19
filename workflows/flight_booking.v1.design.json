@@ -1,132 +1,302 @@
 {
-  "$schema": "../schemas/workflow.schema.json",
+  "spec_version": "0.1",
   "id": "flight_booking",
-  "version": 1,
-  "status": "design",
-  "description": "面向未来运行时的机票查询、选择、报价和预订流程设计。该文件使用目标规范字段，当前原型 engine 尚未加载它。",
-  "start": "collect_trip",
+  "version": "1.0.0",
+  "entry": "collect_trip",
   "slots": {
-    "origin": {"type": "string", "required": true, "owner": "user"},
-    "destination": {"type": "string", "required": true, "owner": "user"},
+    "origin": {
+      "type": "string",
+      "required": true,
+      "source": [
+        "user"
+      ],
+      "mutable": "until_irreversible_effect"
+    },
+    "destination": {
+      "type": "string",
+      "required": true,
+      "source": [
+        "user"
+      ],
+      "mutable": "until_irreversible_effect"
+    },
     "departure_date": {
       "type": "date",
       "required": true,
-      "owner": "user",
-      "mutable": true,
-      "change_policy": {"restart_at": "search_flights"}
+      "source": [
+        "user"
+      ],
+      "mutable": "until_irreversible_effect"
     },
     "cabin": {
       "type": "enum",
-      "values": ["economy", "business", "first"],
+      "values": [
+        "economy",
+        "business",
+        "first"
+      ],
       "required": true,
-      "owner": "user",
-      "mutable": true,
-      "change_policy": {"restart_at": "search_flights"}
+      "source": [
+        "user"
+      ],
+      "mutable": "until_irreversible_effect"
     },
     "selected_flight_id": {
       "type": "string",
-      "required": false,
-      "owner": "user",
-      "mutable": true,
-      "depends_on": ["flight_search"],
-      "change_policy": {"restart_at": "quote_flight"}
+      "required": true,
+      "source": [
+        "user"
+      ],
+      "mutable": "until_irreversible_effect"
     },
-    "passenger_name": {"type": "string", "required": true, "owner": "user"},
-    "passenger_id_number": {"type": "string", "required": true, "owner": "user", "sensitive": true},
-    "booking_confirmation": {"type": "boolean", "required": false, "owner": "user"}
+    "booking_confirmed": {
+      "type": "boolean",
+      "required": true,
+      "source": [
+        "user"
+      ],
+      "mutable": "until_irreversible_effect"
+    }
   },
   "artifacts": {
-    "flight_search": {"producer": "search_flights", "owner": "tool"},
-    "cabin_quote": {"producer": "quote_flight", "owner": "tool"},
-    "booking_order": {"producer": "create_booking", "owner": "tool"}
-  },
-  "policies": {
-    "departure_date": {
-      "invalidates": ["flight_search", "selected_flight_id", "cabin_quote", "booking_confirmation"],
-      "reason": "search_parameters_changed"
+    "flight_search": {
+      "type": "object",
+      "schema": "types/FlightSearchResult@1",
+      "owner": "tool",
+      "validity": {
+        "ttl": "PT60S"
+      }
     },
-    "cabin": {
-      "invalidates": ["flight_search", "selected_flight_id", "cabin_quote", "booking_confirmation"],
-      "reason": "search_parameters_changed"
+    "cabin_quote": {
+      "type": "object",
+      "schema": "types/CabinQuote@1",
+      "owner": "tool",
+      "validity": {
+        "ttl": "PT60S"
+      }
     },
-    "selected_flight_id": {
-      "invalidates": ["cabin_quote", "booking_confirmation"],
-      "reason": "flight_selection_changed"
+    "booking": {
+      "type": "object",
+      "schema": "types/Booking@1",
+      "owner": "tool"
     }
   },
   "nodes": {
     "collect_trip": {
       "type": "ask",
-      "collect": ["origin", "destination", "departure_date"],
-      "prompt": "请提供出发地、目的地和出发日期。",
-      "allowed_intents": ["provide_information", "modify"],
-      "next": "collect_cabin"
-    },
-    "collect_cabin": {
-      "type": "ask",
-      "collect": ["cabin"],
-      "prompt": "请选择经济舱、商务舱或头等舱。",
-      "allowed_intents": ["select_cabin", "modify"],
-      "next": "search_flights"
+      "outputs": [
+        "slots.origin",
+        "slots.destination",
+        "slots.departure_date",
+        "slots.cabin"
+      ],
+      "request": {
+        "kind": "form",
+        "prompt": "请提供出发地、目的地、日期和舱位",
+        "fields": [
+          "slots.origin",
+          "slots.destination",
+          "slots.departure_date",
+          "slots.cabin"
+        ],
+        "accepts": [
+          "answer",
+          "cancel"
+        ]
+      },
+      "on": {
+        "answer": "search_flights",
+        "cancel": "cancelled"
+      }
     },
     "search_flights": {
       "type": "action",
-      "tool": "flight.search",
-      "inputs": ["origin", "destination", "departure_date", "cabin"],
-      "outputs": ["flight_search"],
-      "requires": ["origin", "destination", "departure_date", "cabin"],
-      "transitions": {"success": "choose_flight", "not_found": "no_flight", "error": "escalate"}
+      "inputs": [
+        "slots.origin",
+        "slots.destination",
+        "slots.departure_date",
+        "slots.cabin"
+      ],
+      "outputs": [
+        "artifacts.flight_search"
+      ],
+      "tool": "flight.search@2",
+      "arguments": {
+        "origin": "{{ slots.origin }}",
+        "destination": "{{ slots.destination }}",
+        "date": "{{ slots.departure_date }}",
+        "cabin": "{{ slots.cabin }}"
+      },
+      "result": {
+        "value": "artifacts.flight_search"
+      },
+      "statuses": {
+        "success": "select_flight",
+        "no_result": "no_result",
+        "technical_error": "failed"
+      },
+      "effect": {
+        "kind": "none"
+      }
     },
-    "choose_flight": {
+    "select_flight": {
       "type": "ask",
-      "collect": ["selected_flight_id"],
-      "inputs": ["flight_search"],
-      "prompt": "请从搜索结果中选择一个航班。",
-      "allowed_intents": ["select_flight", "modify"],
-      "next": "quote_flight"
+      "inputs": [
+        "artifacts.flight_search"
+      ],
+      "outputs": [
+        "slots.selected_flight_id"
+      ],
+      "request": {
+        "kind": "selection",
+        "prompt": "请选择航班",
+        "fields": [
+          "slots.selected_flight_id"
+        ],
+        "options_from": "artifacts.flight_search.flights",
+        "accepts": [
+          "answer",
+          "cancel"
+        ]
+      },
+      "on": {
+        "answer": "quote_cabin",
+        "cancel": "cancelled"
+      }
     },
-    "quote_flight": {
+    "quote_cabin": {
       "type": "action",
-      "tool": "flight.quote",
-      "inputs": ["selected_flight_id", "cabin"],
-      "outputs": ["cabin_quote"],
-      "requires": ["selected_flight_id", "cabin"],
-      "transitions": {"success": "collect_passenger", "unavailable": "choose_flight", "error": "escalate"}
-    },
-    "collect_passenger": {
-      "type": "ask",
-      "collect": ["passenger_name", "passenger_id_number"],
-      "sensitive_collect": ["passenger_id_number"],
-      "inputs": ["selected_flight_id", "cabin_quote"],
-      "prompt": "请提供乘机人姓名和身份证号。",
-      "next": "confirm_booking"
+      "inputs": [
+        "slots.selected_flight_id",
+        "slots.cabin"
+      ],
+      "outputs": [
+        "artifacts.cabin_quote"
+      ],
+      "tool": "flight.quote@1",
+      "arguments": {
+        "flight_id": "{{ slots.selected_flight_id }}",
+        "cabin": "{{ slots.cabin }}"
+      },
+      "result": {
+        "value": "artifacts.cabin_quote"
+      },
+      "statuses": {
+        "success": "confirm_booking",
+        "sold_out": "search_flights",
+        "technical_error": "failed"
+      },
+      "effect": {
+        "kind": "none"
+      }
     },
     "confirm_booking": {
       "type": "ask",
-      "collect": ["booking_confirmation"],
-      "inputs": ["origin", "destination", "departure_date", "selected_flight_id", "cabin", "cabin_quote", "passenger_name"],
-      "prompt": "请确认是否购买当前航班。",
-      "allowed_intents": ["confirm", "cancel", "modify"],
-      "intent_routes": {"confirm": "create_booking", "cancel": "end", "modify": "apply_correction"},
-      "next": "create_booking"
-    },
-    "apply_correction": {
-      "type": "control",
-      "purpose": "应用 slot_changes，计算依赖和策略失效集合，并恢复到对应 restart_at 节点。",
-      "next": "confirm_booking"
+      "inputs": [
+        "slots.origin",
+        "slots.destination",
+        "slots.departure_date",
+        "slots.cabin",
+        "slots.selected_flight_id",
+        "artifacts.cabin_quote"
+      ],
+      "outputs": [
+        "slots.booking_confirmed"
+      ],
+      "request": {
+        "kind": "confirmation",
+        "prompt": "请确认航班和价格",
+        "fields": [
+          "slots.booking_confirmed"
+        ],
+        "accepts": [
+          "answer",
+          "cancel"
+        ]
+      },
+      "on": {
+        "answer": "create_booking",
+        "cancel": "cancelled"
+      }
     },
     "create_booking": {
       "type": "action",
-      "tool": "flight.create_booking",
-      "inputs": ["selected_flight_id", "cabin", "passenger_name", "passenger_id_number", "cabin_quote"],
-      "outputs": ["booking_order"],
-      "requires": ["booking_confirmation == true"],
-      "transitions": {"success": "booking_success", "price_changed": "price_changed", "error": "escalate"}
+      "inputs": [
+        "slots.selected_flight_id",
+        "artifacts.cabin_quote",
+        "slots.booking_confirmed"
+      ],
+      "outputs": [
+        "artifacts.booking"
+      ],
+      "requires": [
+        "slots.booking_confirmed == true"
+      ],
+      "on_guard_failure": "confirm_booking",
+      "tool": "booking.create@3",
+      "arguments": {
+        "flight_id": "{{ slots.selected_flight_id }}",
+        "quote_id": "{{ artifacts.cabin_quote.id }}"
+      },
+      "result": {
+        "value": "artifacts.booking"
+      },
+      "statuses": {
+        "success": "completed",
+        "price_changed": "quote_cabin",
+        "technical_error": "failed"
+      },
+      "effect": {
+        "kind": "irreversible",
+        "idempotency_key": "{{ context.workflow_instance_id }}:booking",
+        "on_slot_change": {
+          "mode": "redirect",
+          "node": "start_change_booking"
+        }
+      }
     },
-    "booking_success": {"type": "respond", "template": "订票成功，订单号：{{ booking_order.id }}。"},
-    "price_changed": {"type": "respond", "template": "价格发生变化，请重新确认。", "next": "confirm_booking"},
-    "no_flight": {"type": "respond", "template": "当前条件下没有可用航班。"},
-    "escalate": {"type": "wait", "event": "human_review"},
-    "end": {"type": "end"}
-  }
+    "start_change_booking": {
+      "type": "call",
+      "inputs": [
+        "artifacts.booking"
+      ],
+      "workflow": {
+        "id": "flight_booking_change",
+        "version": "1.0.0"
+      },
+      "map_inputs": {
+        "booking_id": "artifacts.booking.id"
+      },
+      "map_outputs": {},
+      "on": {
+        "completed": "completed",
+        "cancelled": "completed",
+        "failed": "failed"
+      }
+    },
+    "no_result": {
+      "type": "end",
+      "outcome": "no_result"
+    },
+    "cancelled": {
+      "type": "end",
+      "outcome": "cancelled"
+    },
+    "failed": {
+      "type": "end",
+      "outcome": "failed"
+    },
+    "completed": {
+      "type": "end",
+      "inputs": [
+        "artifacts.booking"
+      ],
+      "outcome": "completed",
+      "result": {
+        "booking_id": "{{ artifacts.booking.id }}"
+      }
+    }
+  },
+  "dependencies": [],
+  "policies": []
 }
