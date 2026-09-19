@@ -901,7 +901,7 @@ Confidence 不得：
 | answers[].confidence | number \| null | 是 | 模型自评置信度；有值时范围为闭区间 `[0, 1]`，模型未提供且 Harness 无法可靠推导时为 `null`，不提供写入权限 |
 | answers[].evidence | evidence | 是 | 支持该答案的消息与原文区间；必须通过第 9.1 节校验 |
 
-`answer` 只能回答当前 ask，不能顺便写入其他 Slot。选项型回答必须匹配 `pending_interaction.options[].value`。
+`answer` 这个 Act 只能回答当前 ask，不能在同一个 `answers` 对象中写入其他 Slot。用户同一句话如果还主动提供了其他允许修改的字段，模型可以同时产生独立的 `slot_change` Act；Harness 按第 14.2 节判断这两个 Act 能否一起提交。选项型回答必须匹配 `pending_interaction.options[].value`。
 
 ### 10.2 slot_change
 
@@ -1142,15 +1142,42 @@ Engine Command value
 
 ### 14.2 slot_change 与 answer
 
-当同一消息同时包含 `slot_change` 和 `answer`：
+同一消息可以同时包含 `slot_change` 和 `answer`，但两个 Act 仍然分别编译。Harness 必须先判断 Slot 修改是否会使当前 ask 或它依赖的数据失效：
 
-1. 判断 Slot 修改是否可能使当前 ask 依赖的数据失效；
-2. 如果会失效，只编译 `slot.change`；
-3. 不提交依赖旧状态的 `answer`；
-4. 等待 Engine 重算并发出新的 `interaction.requested`；
-5. 用户对新数据重新确认。
+1. 如果修改会使当前 ask 失效，只编译 `slot.change`，不提交依赖旧状态的 `answer`；
+2. Engine 处理修改、增加 revision、清理失效数据并重新发出 `interaction.requested`；
+3. 用户需要对新问题或新结果重新回答；
+4. 如果修改与当前 ask 独立，且 Harness 能证明它们不共享被失效的数据，可以先提交 `slot.change`，读取新 revision 后再提交 `interaction.answer`；
+5. 如果无法证明独立性，按会失效处理，先修改并重新提问。
 
-Harness 不得把“修改旧条件”和“确认旧结果”一起提交。
+Harness 不得把多个 Slot 塞进 `answer`，也不得把“修改旧条件”和“确认已经失效的旧结果”一起提交。
+
+例如当前 ask 只请求 `slots.departure_date`，用户说“明天，从北京到上海”：
+
+~~~json
+{
+  "interaction_acts": [
+    {
+      "type": "answer",
+      "answers": [
+        {"ref": "slots.departure_date", "raw_value": "明天"}
+      ]
+    },
+    {
+      "type": "slot_change",
+      "changes": [
+        {"ref": "slots.origin", "raw_value": "北京"},
+        {"ref": "slots.destination", "raw_value": "上海"}
+      ]
+    }
+  ],
+  "business_intents": [],
+  "unmapped_requests": [],
+  "ambiguities": []
+}
+~~~
+
+如果此时还没有航班搜索结果，Harness 可以先提交 `slot.change(origin, destination)`，再提交带新 revision 的 `interaction.answer(departure_date)`。如果当前已经展示了依赖旧出发地和到达地的航班列表，则这两个修改会触发失效，旧的 answer 不能直接提交。
 
 ### 14.3 Interaction Act 与 Business Intent
 
