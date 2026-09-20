@@ -53,7 +53,7 @@ Harness 负责把候选结果与可信上下文、字段白名单和原文证据
       {"ref": "slots.origin", "type": "string", "required": true}
     ],
     "options": [],
-    "accepts": ["answer", "slot_change", "cancel_interaction", "unable_to_answer"]
+    "accepts": ["answer", "cancel", "unable_to_answer"]
   },
   "allowed_slots": [
     {"ref": "slots.origin", "type": "string", "mutable": true},
@@ -134,7 +134,7 @@ Harness 负责把候选结果与可信上下文、字段白名单和原文证据
 | `prompt` | string | 是 | 已展示给用户的问题或问题摘要；模型用它判断当前回答对象 |
 | `fields` | array<interaction-field> | 是 | 当前问题允许回答的 Slot；无字段时为空数组，但 `answer` 不能因此凭空写入字段 |
 | `options` | array<option> | 是 | 选择题的候选项；非选择题必须为空数组 |
-| `accepts` | array<enum> | 是 | 本次交互允许识别的 Act：`answer`、`cancel_interaction`、`unable_to_answer`、`slot_change` |
+| `accepts` | array<enum> | 是 | 当前 ask 可以结束等待的 Engine 交互事件：`answer`、`cancel`、`unable_to_answer` |
 
 `interaction-field`：
 
@@ -154,6 +154,34 @@ Harness 负责把候选结果与可信上下文、字段白名单和原文证据
 | `description` | string | 否 | 选项补充说明 |
 
 约束：`form` 可以包含多个 `fields`；`selection` 必须恰好一个字段且 `options` 非空；`confirmation` 必须恰好一个 boolean Slot 且 `options` 为空；`text` 通常恰好一个字段且 `options` 为空。未知 `kind` 或不符合组合约束的输入必须由 Harness 拒绝。
+
+### 2.2.3.1 `kind` 枚举的实际语义
+
+| 值 | 用户应如何回答 | `fields` 约束 | `options` 约束 | 常见例子 |
+|---|---|---|---|---|
+| `form` | 一次填写一个或多个字段 | 一个或多个 | 必须为空 | 同时提供扣款日期、金额和账号关系 |
+| `selection` | 从系统给出的候选中选择 | 恰好一个 | 至少一个；每项 `value` 必须稳定且唯一 | 选择航班或支付方式 |
+| `confirmation` | 表示同意或拒绝 | 恰好一个 boolean Slot | 必须为空 | “确认取消自动续费吗？” |
+| `text` | 自由填写一个字段 | 通常恰好一个 | 必须为空 | 输入手机号、订单号或验证码 |
+
+`kind` 只描述回答格式，不表示业务动作是否成功。比如 `confirmation` 的 `true` 只表示用户同意当前 ask；是否真的取消续费仍由 Engine 调用工具并检查结果。
+
+### 2.2.3.2 `accepts` 枚举的实际语义
+
+`accepts` 与 `kind` 不同：`kind` 描述“答案长什么样”，`accepts` 描述“哪些交互事件可以结束当前等待”。它来自 Workflow Definition 的 `request.accepts`，模型不能自行增加值。
+
+| 值 | 含义 | Harness 对模型暴露的对应 Act | 是否写入当前 fields |
+|---|---|---|---:|
+| `answer` | 用户提供了当前 ask 所需答案 | `answer` | 是，经过类型和选项校验后写入 |
+| `cancel` | 用户放弃回答当前 ask | `cancel_interaction` | 否 |
+| `unable_to_answer` | 用户明确表示无法提供当前答案 | `unable_to_answer` | 否 |
+
+`slot_change` 不属于 `accepts`。它是实例级 Slot 修改，可以在当前 ask 之外发生；只有当 `allowed_slots` 中存在可修改字段并通过 Policy 校验时，Harness 才把模型的 `slot_change` 编译为 `slot.change`。如果 Slot 修改使当前 ask 失效，Engine 会重新计算等待状态。
+
+因此，模型输入同时包含两组不同白名单：
+
+1. `pending_interaction.accepts`：当前 ask 可以接受并结束等待的事件；
+2. `allowed_interaction_acts`：本轮模型可以输出的 Act，其中的 `cancel_interaction` 是 `accepts=cancel` 的模型侧名称，`slot_change` 则由可修改 Slot 决定。
 
 ### 2.2.4 `allowed_slots` 的字段
 
@@ -182,6 +210,19 @@ Harness 负责把候选结果与可信上下文、字段白名单和原文证据
 | `examples` | array<string> | 否 | 给模型的短示例；不构成额外能力声明 |
 
 模型只能返回目录中的 `id`。如果用户表达了目录之外的目标，应放入 `unmapped_requests`，不能根据相似名称猜测一个意图。
+
+### 2.2.6 `allowed_interaction_acts` 的枚举
+
+这是 Harness 根据当前 `pending_interaction` 和 `allowed_slots` 计算出的模型输出白名单。它不是 Workflow Definition 字段，模型也不能修改它。
+
+| 值 | 模型可以识别的用户行为 | 生成的 Harness 规范候选 |
+|---|---|---|
+| `answer` | 用户回答当前 ask | `interaction_acts[].type="answer"` |
+| `slot_change` | 用户更正旧 Slot，或提前提供后续 Slot | `interaction_acts[].type="slot_change"` |
+| `cancel_interaction` | 用户放弃当前 ask | `interaction_acts[].type="cancel_interaction"`；仅当 `accepts` 含 `cancel` |
+| `unable_to_answer` | 用户无法回答当前 ask | `interaction_acts[].type="unable_to_answer"`；仅当 `accepts` 含 `unable_to_answer` |
+
+如果当前没有活动 ask，`answer`、`cancel_interaction` 和 `unable_to_answer` 不应加入白名单；仍可根据活动案件和权限加入 `slot_change` 或业务意图识别。白名单为空时，模型仍必须返回完整输出信封，只能返回业务意图、未映射请求或歧义。
 
 ### 2.3 上下文裁剪规则
 
