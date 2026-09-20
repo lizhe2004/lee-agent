@@ -7,7 +7,7 @@
 
 外部组件如何启动、恢复和修改 Workflow Instance，见 [Workflow Engine 交互协议](./workflow-engine-protocol.md)。
 
-自然语言如何转换为受约束的 Slot 修改和交互回答，见 [Harness Interpretation 协议](./harness-interpretation-protocol.md)。
+大模型调用的输入输出见[大模型交互协议](./model-interaction-protocol.md)；自然语言如何经过 Harness 转换为受约束的 Slot 修改和交互回答，见 [Harness Interpretation 协议](./harness-interpretation-protocol.md)。
 
 ---
 

@@ -3,12 +3,15 @@
 状态：Draft
 协议版本：0.3.0
 
-本文定义 Harness 如何向语言模型提供受约束的理解上下文、语言模型必须返回什么结构，以及 Harness 如何把不可信的语义候选校验为 Workflow Engine Command 或 Intent Router Request。
+本文定义 Harness 如何准备模型调用、校验模型候选，并把通过校验的结果编译为 Workflow Engine Command 或 Intent Router Request。
+
+大模型调用的输入信封、上下文裁剪规则和最小输出结构单独定义在[大模型交互协议](./model-interaction-protocol.md)中。本文不重复规定模型 JSON，而只规定 Harness 如何使用和校验它。
 
 本文依赖：
 
 - [Workflow Definition 规范](./workflow-definition-spec.md)
 - [Workflow Engine 交互协议](./workflow-engine-protocol.md)
+- [大模型交互协议](./model-interaction-protocol.md)
 
 ---
 
@@ -82,8 +85,8 @@
                     ↓
                  语言模型
                     ↓
-            Interpretation Result
-              不可信语义候选
+          Model Interpretation Candidate
+              （模型交互协议）
                     ↓
                   Harness
        结构校验、证据校验、规范化、权限裁剪
@@ -107,7 +110,7 @@
 - 新建退款 Workflow；
 - 在当前其他 Workflow 之外增加一个退款 Workflow。
 
-因此 Interpretation Result 不得包含 `new_intent`。模型不负责判断一个意图相对当前 Workflow 是不是“新”的。
+因此 Harness 规范结果不得包含 `new_intent`。模型也不负责判断一个意图相对当前 Workflow 是不是“新”的。
 
 ### 1.5 信任边界
 
@@ -123,62 +126,11 @@
 - 身份认证、授权和业务 Policy；
 - Router 对活动 Workflow 的判断。
 
-### 1.6 模型输出与 Harness 规范结果分层
+### 1.6 模型结果在 Harness 中的角色
 
-本文定义的 `Interpretation Result` 是 Harness 校验后的规范结果，不等于要求模型一次生成的完整 JSON。模型使用一个更小的候选结构，Harness 再补充可信上下文、规范化值、证据和执行所需的字段。
+模型调用必须遵循[大模型交互协议](./model-interaction-protocol.md)。该协议中的输出是最小的语义候选，只包含模型从当前消息中识别出的回答、Slot 修改、业务意图、未映射请求和歧义。
 
-模型最小输出只需要表达“用户做了什么”和“用户提到了哪些目标”，例如：
-
-~~~json
-{
-  "interaction_acts": [
-    {
-      "type": "slot_change",
-      "changes": [
-        {
-          "ref": "slots.departure_date",
-          "raw_value": "明天"
-        }
-      ]
-    }
-  ],
-  "business_intents": [
-    {
-      "intent": "cancel_auto_renewal",
-      "entities": []
-    }
-  ],
-  "unmapped_requests": [],
-  "ambiguities": []
-}
-~~~
-
-模型输出不需要生成 `interpretation_version`、`utterance_id`、`interaction_id`、actor、revision、Engine Command，也不强制生成 `candidate_value`、Evidence 字符区间或 Confidence。模型可以提供这些字段作为提示，但 Harness 必须重新校验；缺失的 `candidate_value` 和 Evidence 可以由确定性逻辑补全，缺失的 Confidence 记录为 `null`，不能伪造模型自评。
-
-处理链路是：
-
-~~~text
-模型最小候选
-  → JSON Schema / constrained decoding
-  → Harness 白名单和原文校验
-  → 确定性规范化与证据补全
-  → Interpretation Result
-  → Engine Command / Router Request
-~~~
-
-因此后文的 Interaction Act、Business Intent 和 Evidence 字段表描述的是 Harness 规范结果；模型侧只实现本节规定的最小候选结构。
-
-模型最小候选结构的约束是：
-
-| 候选对象 | 模型必须提供 | Harness 负责补充或校验 |
-|---|---|---|
-| `interaction_acts[].type` | `answer`、`slot_change`、`cancel_interaction` 或 `unable_to_answer` | 是否在 `allowed_interaction_acts`，以及是否符合当前 `pending_interaction` |
-| `answer` / `slot_change` 的字段项 | `ref` 和用户原文中的 `raw_value` | Slot 类型、选项、规范 `candidate_value`、Evidence 和最终 Command 字段 |
-| `business_intents[]` | Catalog 中的 `intent` 和可选实体原文 | Intent 白名单、实体白名单、实体规范化、Evidence 和 Router Request 字段 |
-| `unmapped_requests[]` | 用户请求的 `summary` | 原文依据、是否其实可以映射到 Catalog |
-| `ambiguities[]` | 歧义类别、涉及对象和候选提示 | 候选是否真实存在、阻断范围和澄清文案 |
-
-模型侧的字段越少，越适合使用 JSON Schema constrained decoding 或工具调用约束；复杂的跨字段关系仍由 Harness 做确定性校验。
+Harness 不把模型候选当作事实。它会根据可信的 `pending_interaction`、`allowed_slots`、Intent Catalog、Runtime State 和原文重新校验、规范化并补充执行字段，形成本文后续定义的 `Interpretation Result`。只有这个经过校验的结果才能编译为 Engine Command 或 Router Request。
 
 ## 2. 角色与职责
 
@@ -730,7 +682,7 @@ Business Intent 到 Workflow Definition 的映射属于 Router 的可信能力�
 }
 ~~~
 
-例如，当前消息是“我要订机票”。模型可以只输出意图 ID 和空实体列表：
+例如，Harness 根据[大模型交互协议](./model-interaction-protocol.md)收到的候选可以只包含意图 ID 和空实体列表：
 
 ~~~json
 {
@@ -984,7 +936,7 @@ Confidence 不得：
 
 假设当前 `pending_interaction` 是一个确认问题，目标字段为 `slots.booking_confirmed`，并且当前 ask 的 `request.accepts` 包含 `answer`、`unable_to_answer` 和 `cancel`。模型的最小输出可以分别是：
 
-| 用户原话 | 模型最小输出中的 Interaction Act | Harness 规范化后的含义 |
+| 用户原话 | 模型交互协议中的 Interaction Act | Harness 规范化后的含义 |
 |---|---|---|
 | 是 | `{"type":"answer","answers":[{"ref":"slots.booking_confirmed","raw_value":"是"}]}` | `candidate_value = true`，生成 `interaction.answer` |
 | 否 | `{"type":"answer","answers":[{"ref":"slots.booking_confirmed","raw_value":"否"}]}` | `candidate_value = false`，生成 `interaction.answer` |
@@ -1199,10 +1151,10 @@ Harness 必须按以下顺序处理模型输出。
 ### 15.1 结构校验
 
 - 输出是完整 JSON 对象；
-- 符合本协议第 1.6 节的 Model Interpretation Schema；
+- 符合[大模型交互协议](./model-interaction-protocol.md)第 3 节的模型输出结构；
 - 不含未知字段；
-- 模型输出不要求包含 `interpretation_version`、`utterance_id`、actor 或 revision；
-- Harness 在校验通过后补充 `interpretation_version`、`utterance_id` 和可信上下文，构造规范的 Interpretation Result。
+- `protocol_version` 和 `request_id` 与本次模型请求一致；
+- Harness 校验通过后补充 `interpretation_version`、`utterance_id` 和可信上下文，构造本文第 8 节的规范 `Interpretation Result`。
 
 ### 15.2 白名单与引用校验
 
