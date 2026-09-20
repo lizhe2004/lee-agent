@@ -88,8 +88,8 @@ Harness 负责把候选结果与可信上下文、字段白名单和原文证据
 | `timezone` | string | 是 | 相对日期和本地时间的解析时区 |
 | `conversation_context` | object | 否 | Harness 裁剪后的对话上下文；模型不得把摘要当作新事实 |
 | `pending_interaction` | object | null | 是 | 当前等待回答的问题；没有活动 ask 时为 `null` |
-| `allowed_slots` | array | 是 | 本轮允许模型提取的可写 Slot 投影；不在其中的字段不能作为 Slot 修改候选 |
-| `intent_catalog` | array | 是 | 本轮可识别的业务意图及其说明；不在其中的意图不能被模型声称已命中 |
+| `allowed_slots` | array<allowed-slot> | 是 | 本轮允许模型提取的可写 Slot 投影；不在其中的字段不能作为 Slot 修改候选 |
+| `intent_catalog` | array<intent-definition> | 是 | 本轮可识别的业务意图及其说明；不在其中的意图不能被模型声称已命中 |
 | `allowed_interaction_acts` | array<enum> | 是 | 本轮允许输出的 Interaction Act 集合；只能使用列出的值 |
 
 `pending_interaction` 中的 `fields`、`options` 和 `accepts` 是当前问题的约束。`allowed_slots` 用于处理用户在同一句话中顺便提供的其他信息，例如当前问出发地时同时说出到达地和日期。
@@ -194,13 +194,22 @@ Harness 负责把候选结果与可信上下文、字段白名单和原文证据
 | `mutable` | boolean | 是 | 当前阶段是否允许用户修改；`false` 时模型不能生成该字段的 `slot_change` |
 | `current_value` | any \| null | 否 | Harness 选择性提供的当前值；敏感字段可省略或脱敏，模型不得把它当作用户本轮新输入 |
 | `description` | string | 否 | 字段业务含义和常见表达 |
-| `allowed_values` | array | 否 | enum Slot 的允许值或其显示投影；非 enum 字段省略 |
+| `allowed_values` | array<allowed-value> | 否 | enum Slot 的允许值或其显示投影；非 enum 字段省略 |
 
 模型只能从用户当前消息和允许的上下文中提取新值。`current_value` 只用于理解“改成另一个”“保持不变”等表达，不足以单独生成 `slot_change`。
+
+`allowed-value`：
+
+| 字段 | 类型 | 必填 | 含义 |
+|---|---|---:|---|
+| `value` | string | number | boolean | 是 | Engine 认可的稳定值 |
+| `label` | string | 是 | 给模型理解和展示使用的文字 |
 
 ### 2.2.5 `intent_catalog` 的字段
 
 `intent_catalog` 是本次调用允许模型识别的业务目标目录。它不是 Workflow 列表，也不向模型暴露“新建/恢复”策略。
+
+`intent_catalog` 的每个元素就是一个 `intent-definition` 对象：
 
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
@@ -272,10 +281,10 @@ Harness 可以传最近消息、相关历史摘要和当前问题，但应：
 |---|---|---:|---|
 | `protocol_version` | exact semver | 是 | 必须等于输入版本 |
 | `request_id` | string | 是 | 必须等于输入 `request_id` |
-| `interaction_acts` | array | 是 | 对当前 ask 的回答、Slot 修改、取消或无法回答候选；没有时为空数组 |
-| `business_intents` | array | 是 | 用户表达的业务目标候选；没有时为空数组 |
-| `unmapped_requests` | array | 是 | 无法映射到输入 Intent Catalog 的请求；没有时为空数组 |
-| `ambiguities` | array | 是 | 影响解释的歧义；没有时为空数组 |
+| `interaction_acts` | array<interaction-act> | 是 | 对当前 ask 的回答、Slot 修改、取消或无法回答候选；没有时为空数组 |
+| `business_intents` | array<business-intent> | 是 | 用户表达的业务目标候选；没有时为空数组 |
+| `unmapped_requests` | array<unmapped-request> | 是 | 无法映射到输入 Intent Catalog 的请求；没有时为空数组 |
+| `ambiguities` | array<ambiguity> | 是 | 影响解释的歧义；没有时为空数组 |
 
 模型不得输出控制字段，例如 `workflow_id`、`interaction_id`、`expected_instance_revision`、`command_id`、`target_node`、`invalidates` 或 `policy_result`。
 
@@ -321,7 +330,16 @@ Harness 可以传最近消息、相关历史摘要和当前问题，但应：
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
 | `ref` | slot-ref | 是 | 输入 `pending_interaction.fields` 或 `allowed_slots` 中的 Slot 引用 |
-| `raw_value` | string | object | array | 是 | 从用户原文提取的原始候选值；不要求模型完成最终类型转换 |
+| `raw_value` | string \| object \| array<any> | 是 | 从用户原文提取的原始候选值；不要求模型完成最终类型转换 |
+
+因此，`pending_interaction.fields` 的元素类型就是这里定义的 `interaction-field`，而模型输出中 `answer.changes` 和 `slot_change.changes` 的元素类型是 `change`。二者不是同一个对象：前者描述“允许回答哪些字段”，后者描述“用户这次提供了什么值”。
+
+`change` 只有两个字段：
+
+| 字段 | 类型 | 必填 | 含义 |
+|---|---|---:|---|
+| `ref` | slot-ref | 是 | 本次候选值对应的 Slot；必须能在相应白名单中找到 |
+| `raw_value` | string \| object \| array<any> | 是 | 当前消息中提取的原始值 |
 
 `slot_change.reason` 只能使用：
 
@@ -345,13 +363,20 @@ Harness 可以传最近消息、相关历史摘要和当前问题，但应：
 | 字段 | 类型 | 必填 | 含义 |
 |---|---|---:|---|
 | `intent` | string | 是 | 必须来自输入的 `intent_catalog[].id` |
-| `entities` | array | 是 | 该意图相关的字段候选；没有实体时为空数组 |
+| `entities` | array<entity> | 是 | 该意图相关的字段候选；没有实体时为空数组 |
 | `entities[].ref` | string | 是 | Intent Catalog 为该意图允许的字段引用 |
-| `entities[].raw_value` | string \| object \| array | 是 | 用户原文中的实体候选 |
+| `entities[].raw_value` | string \| object \| array<any> | 是 | 用户原文中的实体候选 |
 
 模型只报告业务目标，不判断它是当前 Workflow 的继续、恢复还是新建。该判断由 Router 根据可信运行状态完成。
 
 同一个 Intent 下的实体 `ref` 必须出现在该 Intent 的 `entity_refs` 中；实体候选不能直接写入 Workflow Slot，也不能代表身份、资格或授权结果。
+
+`entity` 的元素结构为：
+
+| 字段 | 类型 | 必填 | 含义 |
+|---|---|---:|---|
+| `ref` | string | 是 | 当前 Intent 的实体字段引用 |
+| `raw_value` | string \| object \| array<any> | 是 | 当前消息中的实体原文候选 |
 
 ### 3.5 无法映射和歧义
 
