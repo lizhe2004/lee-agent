@@ -1,146 +1,112 @@
-# Workflow `refund_request v1`
+# 退款 Workflow 示例
 
-Start node: `collect_order_clues`
+这是退款 SOP 的设计示例，说明如何把客服话术转换为 Proposal，再由 Engine 按安全规则执行。
 
-## Nodes
+## 1. 业务目标
 
-### `collect_order_clues` (ask)
-- Prompt: 请提供扣款日期、金额、购买渠道（如果知道），以及订单属于当前账号还是其他账号。
-- Collects: `charge_date, amount, purchase_channel_hint, account_relation`
-- Next: `account_scope`
+```text
+收集订单线索
+  → 确认目标账号
+  → 必要时 OTP 身份认证
+  → 查询订单
+  → 查询播放记录和历史退款
+  → 判断资格
+  → 用户确认
+  → 执行退款或转 Apple/人工
+```
 
-### `account_scope` (branch)
-- If `account_relation == 'current'` → `bind_current_account`
-- Default → `ask_purchase_phone`
+## 2. 核心 Slot 和 Artifact
 
-### `bind_current_account` (action)
-- Tool: `bind_current_account`
-- Requires: `session.authenticated`
-- Guard failure: `ask_purchase_phone`
-- Transitions:
-  - `bound` → `find_order`
-  - `error` → `escalate`
+| 名称 | 类型 | 来源 | 说明 |
+|---|---|---|---|
+| `charge_date` | date | user | 扣款日期 |
+| `amount` | money | user | 扣款金额 |
+| `account_relation` | enum | user | current 或 other |
+| `purchase_account_phone` | phone | user | 非当前账号时使用 |
+| `otp_code` | string | user | 敏感输入，验证后消费 |
+| `target_account_verified` | boolean Artifact | tool | 只能由认证工具产生 |
+| `order` | object Artifact | tool | 订单查询结果 |
+| `refund_facts` | object Artifact | tool | 播放记录和历史退款结果 |
+| `refund_eligibility` | enum Artifact | system | eligible、ineligible 或 manual_review |
+| `refund_confirmed` | boolean | user | 用户确认是否执行退款 |
 
-### `ask_purchase_phone` (ask)
-- Prompt: 请提供购买账号绑定的手机号，我会发送验证码验证账号归属。
-- Collects: `purchase_account_phone`
-- Next: `send_otp`
+## 3. 关键安全规则
 
-### `send_otp` (action)
-- Tool: `send_otp`
-- Requires: `purchase_account_phone`
-- Guard failure: `ask_purchase_phone`
-- Transitions:
-  - `sent` → `ask_otp`
-  - `rate_limited` → `escalate`
-  - `error` → `escalate`
+### 当前账号
 
-### `ask_otp` (ask)
-- Prompt: 验证码已发送，请在安全输入区域输入验证码。
-- Collects: `otp_code`
-- Next: `verify_otp`
+用户说“当前账号”只能产生 `account_relation=current` Proposal。Engine 仍需绑定当前认证主体，不能把用户文本当作 `target_account_verified=true`。
 
-### `verify_otp` (action)
-- Tool: `verify_otp`
-- Requires: `purchase_account_phone, otp_code`
-- Guard failure: `ask_otp`
-- Transitions:
-  - `verified` → `find_order`
-  - `failed` → `ask_otp`
-  - `expired` → `ask_otp`
-  - `error` → `escalate`
+### 非当前账号
 
-### `find_order` (action)
-- Tool: `find_order`
-- Requires: `target_account_verified`
-- Guard failure: `verify_otp`
-- Transitions:
-  - `found` → `route_by_channel`
-  - `not_found` → `ask_order_clue`
-  - `error` → `escalate`
+用户说“不是当前账号”后，Engine 必须：
 
-### `ask_order_clue` (ask)
-- Prompt: 暂时没有找到匹配订单。请再核对扣款日期、金额或购买渠道。
-- Collects: `charge_date, amount, purchase_channel_hint`
-- Next: `find_order`
+1. 询问手机号；
+2. 发送验证码；
+3. 等待验证码；
+4. 调用验证工具；
+5. 认证成功后才查询目标账号订单。
 
-### `route_by_channel` (branch)
-- If `order.channel == 'apple'` → `guide_apple`
-- If `order.channel == 'first_party'` → `load_refund_facts`
-- Default → `guide_other_store`
+OTP 不属于普通可回显 Slot，验证后应消费原文和临时值。
 
-### `load_refund_facts` (action)
-- Tool: `get_refund_facts`
-- Requires: `target_account_verified, order.id`
-- Guard failure: `find_order`
-- Transitions:
-  - `success` → `assess_eligibility`
-  - `error` → `escalate`
+### 修改手机号
 
-### `assess_eligibility` (action)
-- Tool: `evaluate_refund_policy`
-- Requires: `refund_facts_loaded`
-- Guard failure: `load_refund_facts`
-- Transitions:
-  - `eligible` → `confirm_refund`
-  - `ineligible` → `explain_ineligible`
-  - `uncertain` → `escalate`
-  - `error` → `escalate`
+已认证后用户修改手机号时：
 
-### `confirm_refund` (ask)
-- Prompt: 这笔订单符合退款申请条件。请确认是否提交退款申请。
-- Collects: `confirm_refund`
-- Next: `refund_confirmation_gate`
+```text
+purchase_account_phone 变化
+  → target_account_verified 失效
+  → 当前退款确认失效
+  → 重新发送 OTP
+```
 
-### `refund_confirmation_gate` (branch)
-- If `confirm_refund == true` → `submit_refund`
-- Default → `refund_declined`
+这是安全 Policy；普通数据依赖和 Policy 都由 Engine 计算，模型不能声明清理列表。
 
-### `submit_refund` (action)
-- Tool: `submit_refund`
-- Requires: `target_account_verified, order.id, refund_eligibility == 'eligible', confirm_refund`
-- Guard failure: `escalate`
-- Transitions:
-  - `submitted` → `report_submitted`
-  - `already_submitted` → `report_already_submitted`
-  - `error` → `escalate`
+### iOS 购买
 
-### `explain_ineligible` (respond)
-- Template: 根据当前退款规则，这笔订单暂不符合退款条件：{{ refund_reason }}。
-- Next: `done`
+如果 `order.channel=ios`，进入 Apple 申请说明路径，不调用本方退款副作用。
 
-### `guide_apple` (respond)
-- Template: 这笔订单通过 Apple 购买，需要通过 Apple 的退款流程申请。本系统没有提交退款。
-- Next: `done`
+### 退款资格
 
-### `guide_other_store` (respond)
-- Template: 这笔订单需要通过购买渠道 {{ order.channel }} 申请退款。本系统没有提交退款。
-- Next: `done`
+播放记录、历史退款和订单状态都是可信 Artifact。模型或用户不能直接写入 `refund_eligibility`。
 
-### `refund_declined` (respond)
-- Template: 好的，我没有提交退款申请。
-- Next: `done`
+## 4. Proposal 示例
 
-### `report_submitted` (respond)
-- Template: 退款申请已提交，当前状态为 {{ refund_submission.status }}。这表示申请已受理，不代表款项已到账。
-- Next: `done`
+用户说：
 
-### `report_already_submitted` (respond)
-- Template: 系统显示这笔订单已有退款申请，不会重复提交。
-- Next: `done`
+```text
+不是当前账号，是以前的手机号，验证码我不记得了。
+```
 
-### `escalate` (action)
-- Tool: `create_handoff`
-- Requires: `none`
-- Guard failure: `handoff_failed`
-- Transitions:
-  - `created` → `wait_for_human`
-  - `error` → `handoff_failed`
+Model Candidate 可以包含：
 
-### `wait_for_human` (wait)
-- Event: `human_case_updated`
+```json
+{
+  "proposals": [
+    {"target": "slots.account_relation", "candidates": [{"raw_value": "不是当前账号"}], "relation": "single", "commitment": "explicit"},
+    {"target": "slots.purchase_account_phone", "candidates": [{"raw_value": "以前的手机号"}], "relation": "single", "commitment": "explicit"}
+  ],
+  "interaction_acts": [{"type": "unable_to_answer", "reason": "does_not_know", "raw_value": "验证码我不记得了"}]
+}
+```
 
-### `handoff_failed` (respond)
-- Template: 暂时无法连接人工客服，请稍后重试。
+Harness 不能把“不记得验证码”写入 `otp_code`。Engine 应根据当前 ask 的 `on.unable_to_answer` 走重新发送、替代验证或人工路径。
 
-### `done` (end)
+## 5. 修改订单线索
+
+用户在确认前说“日期改成 9 月 11 日”：
+
+1. Harness 生成 `charge_date` correction Proposal；
+2. Engine 使订单查询、播放记录、历史退款和资格结果失效；
+3. 重新查询并重新判断资格；
+4. 旧退款确认不能复用；
+5. 退款工具不能在旧确认上执行。
+
+## 6. 允许的终态
+
+| 终态 | 条件 |
+|---|---|
+| `refund_submitted` | 身份、订单、资格和用户确认全部有效，退款工具成功 |
+| `apple_redirect` | 订单来源为 iOS |
+| `ineligible` | 可信资格判断不满足退款条件 |
+| `manual_review` | 工具或 Policy 要求人工处理 |
+| `cancelled` | 用户取消当前交互或案件 |

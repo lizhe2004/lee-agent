@@ -185,17 +185,15 @@
 
 ```json
 {
-  "interaction_acts": [
-    {"type": "answer", "slot_changes": {"origin": "北京"}},
-    {
-      "type": "slot_change",
-      "slot_changes": {
-        "destination": "上海",
-        "departure_date": "明天"
-      },
-      "reason": "user_provided_additional_info"
-    }
-  ]
+  "proposals": [
+    {"target": "slots.origin", "candidates": [{"raw_value": "北京"}], "relation": "single", "commitment": "explicit"},
+    {"target": "slots.destination", "candidates": [{"raw_value": "上海"}], "relation": "single", "commitment": "explicit"},
+    {"target": "slots.departure_date", "candidates": [{"raw_value": "明天"}], "relation": "single", "commitment": "explicit"}
+  ],
+  "interaction_acts": [{"type": "answer"}],
+  "business_intents": [],
+  "unmapped_requests": [],
+  "ambiguities": []
 }
 ```
 
@@ -298,6 +296,65 @@
 - 模型不自行决定这是新 Workflow 还是继续已有 Workflow；
 - Router 根据活动 Workflow 和案件策略决定澄清、排队、并行或新建。
 
+### INTERACTION-005 用户接受多个候选日期
+
+**前置状态**：当前 ask 要求一个出发日期，目标 Slot `departure_date` 是单值 `date`，系统尚未查询航班。
+
+**对话**：
+
+```text
+客服：您准备哪天出发？
+用户：明天后天都行。
+```
+
+**期望 Model 候选**：
+
+```json
+{
+  "proposals": [
+    {
+      "target": "slots.departure_date",
+      "candidates": [{"raw_value": "明天"}, {"raw_value": "后天"}],
+      "relation": "any_of",
+      "commitment": "user_accepts_any"
+    }
+  ],
+  "interaction_acts": [],
+  "business_intents": [],
+  "unmapped_requests": [],
+  "ambiguities": []
+}
+```
+
+**期望行为**：
+
+- 不能把“明天”当成用户唯一选择；
+- 如果航班查询支持候选日期集合，保留两个候选并查询可用性；
+- 如果系统有“优先较早日期”等明确 Policy，可以按 Policy 代选并告知用户；
+- 如果 Slot 只能保存一个日期且没有代选规则，向用户追问偏好；
+- 在确定日期前不生成依赖单一日期的报价或确认文案。
+
+### INTERACTION-006 多个候选加“我记不得了”
+
+**前置状态**：当前 ask 要求选择早餐，目标 Slot `breakfast` 是单值 enum，只允许一个最终值。
+
+**对话**：
+
+```text
+客服：您要小米粥还是米饭？
+用户：小米粥或者米饭吧，我记不得了。
+```
+
+**期望行为**：
+
+- Model 候选应表达 `target=slots.breakfast`、两个候选、`relation=any_of` 和 `commitment=uncertain`，并可附带 `unable_to_answer`；
+- 识别为两个候选都可以接受，而不是擅自选择小米粥；
+- 记录 `candidates=["millet_congee", "rice"]`、`relation=any_of` 和 `commitment=uncertain`；
+- 如果业务允许任意一个，由明确 Policy 或后端可用性决定最终值；
+- 如果必须由用户明确选择，生成澄清问题；
+- 在没有明确最终值前，不写入单值 `breakfast` Slot；
+- “我记不得了”不能被解释为用户确认了第一个候选。
+
 ## 6. 不可信输入与并发
 
 ### SAFETY-001 用户伪造可信字段
@@ -348,7 +405,7 @@
 
 | 层次 | 用例范围 |
 |---|---|
-| Model/Harness contract tests | INTERACTION-001～004、FLIGHT-001、SAFETY-001 |
+| Model/Harness contract tests | INTERACTION-001～006、FLIGHT-001、SAFETY-001 |
 | Engine state transition tests | REFUND-003、REFUND-004、REFUND-005、FLIGHT-002～004 |
 | End-to-end Harness tests | REFUND-001～006、CANCEL-001～003、FLIGHT-001～002 |
 | Concurrency and fail-closed tests | SAFETY-002～004 |

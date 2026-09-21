@@ -5,9 +5,9 @@
 
 本文定义外部组件与 Workflow Engine 之间的结构化交互协议。协议独立于 HTTP、消息队列、RPC 和进程内调用，可用于 CLI、服务化部署和异步执行环境。
 
-本文依赖 [Workflow Definition 规范](./workflow-definition-spec.md) 中的 Workflow、Slot、Artifact、Node、Policy、revision 和失效语义。
+本文依赖 [总体设计](./architecture-overview.md) 和 [Workflow Definition 规范](./workflow-definition-spec.md) 中的 Workflow、Proposal、Slot、Artifact、Node、Policy、revision 和失效语义。
 
-自然语言如何被理解并编译为 Engine Command，见 [Harness Interpretation 协议](./harness-interpretation-protocol.md)。
+大模型输入输出见 [大模型交互协议](./model-interaction-protocol.md)；自然语言如何被校验并编译为 Engine Command，见 [Harness Interpretation 协议](./harness-interpretation-protocol.md)。
 
 ---
 
@@ -22,6 +22,7 @@
 | Runtime State | 一个 Instance 当前保存的节点进度、Slot、Artifact、等待状态和版本信息 |
 | Node | Workflow 中一个可执行步骤；常见类型包括询问用户、调用工具、判断分支和结束流程 |
 | Slot | 用户、调用方或可信事件可以提供和修改的流程变量，例如日期或订单号 |
+| Proposal | Harness 提交给 Engine、尚未按 Definition Policy 解析的候选值或候选集合 |
 | Artifact | 节点或工具产生的派生结果，例如航班列表或验证结果，外部用户不能直接写入 |
 | Command | 外部组件提交给 Engine、请求改变一个 Instance 的结构化输入 |
 | Decision | Engine 对一个 Command 的同步处理结论，说明是否接受、版本如何变化以及产生了哪些输出 |
@@ -108,7 +109,7 @@ Workflow Engine
 
 Harness 负责：
 
-- 将用户消息解释为 interaction.answer、interaction.unable_to_answer、slot.change 或 interaction.cancel；
+- 将用户消息解释为 Proposal、interaction.answer、interaction.unable_to_answer、slot.change 或 interaction.cancel；
 - 保存并回传 Engine 发出的 interaction_id；
 - 将 interaction.requested 和 response.produced 转换成用户可理解的内容；
 - 附带真实 actor、channel 和 trace 信息。
@@ -147,6 +148,7 @@ Subworkflow Runner 消费 subworkflow.requested，启动固定版本的子 Workf
 | interaction.answer | 是 | 否 | 否 | 否 | 否 | 否 |
 | interaction.unable_to_answer | 是 | 否 | 否 | 否 | 否 | 可选 |
 | interaction.cancel | 是 | 否 | 否 | 否 | 否 | 是 |
+| proposal.submit | 是 | 否 | 否 | 可选 | 否 | 可选 |
 | slot.change | 是 | 否 | 否 | 可选 | 否 | 可选 |
 | tool.result | 否 | 是 | 否 | 否 | 否 | 否 |
 | timer.fired | 否 | 否 | 是 | 否 | 否 | 否 |
@@ -227,7 +229,7 @@ new_state、decision 和 emissions 必须在同一个逻辑事务中提交。
 | occurred_at | datetime | 是 | 该操作在来源系统实际发生的时间；它用于审计，不代表 Engine 的提交时间 |
 | payload | object | 是 | 与 `type` 对应的专属参数；不同 Command 类型使用不同字段 |
 
-本版本的 `command-type` 是封闭集合：`workflow.start`、`workflow.cancel`、`interaction.answer`、`interaction.unable_to_answer`、`interaction.cancel`、`slot.change`、`tool.result`、`timer.fired`、`external.event`、`subworkflow.result`。未知类型必须拒绝；扩展 Command 需要新的协议版本或明确的扩展命名空间。
+本版本的 `command-type` 是封闭集合：`workflow.start`、`workflow.cancel`、`interaction.answer`、`interaction.unable_to_answer`、`interaction.cancel`、`proposal.submit`、`slot.change`、`tool.result`、`timer.fired`、`external.event`、`subworkflow.result`。未知类型必须拒绝；扩展 Command 需要新的协议版本或明确的扩展命名空间。
 
 ### 4.3 actor
 
@@ -380,7 +382,9 @@ Engine 必须验证：
 - answers 只包含 ask.request.fields；
 - Slot source 允许当前 actor；
 - 值符合 Slot 类型；
+- 对单值 Slot，`answers` 中的 value 必须是一个确定值；多个候选不能以数组形式绕过 Slot 类型校验；
 - 选项仍属于当前 valid options_from；
+- 如果输入来自多个候选 Proposal，必须先按 Definition 的 `cardinality`、`proposal_resolution` 和 `selection_policy` 解析；未解析的候选不能写入 committed Slot；
 - interaction_id 未被 Slot 修改或重算撤销。
 
 ### 6.2 interaction.cancel
@@ -449,7 +453,41 @@ Engine 必须验证 `interaction_id`、实例 revision、当前 ask 是否在 `r
 
 ## 7. Slot 修改 Command
 
-### 7.1 slot.change
+### 7.1 proposal.submit
+
+`proposal.submit` 保存 Harness 已校验但尚未按 Workflow Policy 解析的用户提议。它不会直接写入 committed Slot，也不会由 Command 自己指定下一节点。
+
+~~~json
+{
+  "protocol_version": "0.2",
+  "command_id": "cmd_proposal_001",
+  "type": "proposal.submit",
+  "workflow_instance_id": "wfi_01J7Y7ZZ",
+  "expected_instance_revision": 18,
+  "actor": {"type": "user", "id": "user_123", "tenant_id": "tenant_a"},
+  "occurred_at": "2026-09-19T10:03:00+08:00",
+  "payload": {
+    "proposals": [
+      {
+        "target": "slots.departure_date",
+        "candidates": ["2026-09-20", "2026-09-21"],
+        "relation": "any_of",
+        "commitment": "user_accepts_any"
+      }
+    ],
+    "source_message_id": "msg_789"
+  }
+}
+~~~
+
+| payload 字段 | 类型 | 必填 | 含义与约束 |
+|---|---|---:|---|
+| `proposals` | proposal[] | 是 | 至少一项；每项必须通过 Definition 的 Slot 和 Proposal Policy 校验 |
+| `source_message_id` | string | 是 | 产生这些提议的用户消息 ID，用于审计和去重 |
+
+Engine 接受后保存 Proposal、增加 instance revision，并按照 `cardinality` 和 `proposal_resolution` 决定：继续等待、请求澄清、调用候选查询工具或提交一个确定 Slot。未解析的 Proposal 不能满足依赖 committed Slot 的节点输入。
+
+### 7.2 slot.change
 
 slot.change 在实例尚未终止时修改一个或多个既有 Slot。它不表示跳转到某个节点；Engine 根据依赖图、Policy 和重算前沿决定后续执行。
 
@@ -492,7 +530,7 @@ Engine 必须将同一个 slot.change 中的所有 changes 作为原子集合处
 
 Harness 不提交 invalidates、restart_at 或 target_node。它们由 Definition 和 Engine 计算。
 
-### 7.2 slot.change 结果
+### 7.3 slot.change 结果
 
 成功处理后，Decision 可以包含摘要：
 

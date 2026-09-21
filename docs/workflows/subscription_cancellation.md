@@ -1,129 +1,77 @@
-# Workflow `subscription_cancellation v1`
+# 取消自动续费 Workflow 示例
 
-Start node: `collect_subscription_clues`
+这是取消自动续费的设计示例，重点说明身份、渠道和不可逆副作用。
 
-## Nodes
+## 1. 业务目标
 
-### `collect_subscription_clues` (ask)
-- Prompt: 请说明订阅属于当前账号还是其他账号、购买渠道，以及订阅或扣款的大致信息。
-- Collects: `account_relation, purchase_channel_hint, subscription_hint, charge_date`
-- Next: `account_scope`
+```text
+确认订阅
+  → 确认账号和购买渠道
+  → 必要时身份认证
+  → 查询订阅状态
+  → 根据渠道确定处理方式
+  → 用户确认取消
+  → 提交取消副作用
+```
 
-### `account_scope` (branch)
-- If `account_relation == 'current'` → `bind_current_account`
-- Default → `ask_purchase_phone`
+## 2. Slot 和 Artifact
 
-### `bind_current_account` (action)
-- Tool: `bind_current_account`
-- Requires: `session.authenticated`
-- Guard failure: `ask_purchase_phone`
-- Transitions:
-  - `bound` → `find_subscription`
-  - `error` → `escalate`
+| 名称 | 类型 | 来源 | 说明 |
+|---|---|---|---|
+| `account_relation` | enum | user | current 或 other |
+| `purchase_account_phone` | phone | user | 非当前账号时使用 |
+| `otp_code` | string | user | 验证后消费 |
+| `purchase_channel_hint` | enum | user | first_party、apple 或 google_play |
+| `subscription_hint` | string | user | 订阅线索 |
+| `target_account_verified` | boolean Artifact | tool | 可信认证结果 |
+| `subscription` | object Artifact | tool | 当前订阅查询结果 |
+| `cancel_confirmed` | boolean | user | 用户是否确认取消 |
+| `cancellation_result` | object Artifact | tool | 取消工具结果 |
 
-### `ask_purchase_phone` (ask)
-- Prompt: 请提供订阅账号绑定的手机号，我会发送验证码验证账号归属。
-- Collects: `purchase_account_phone`
-- Next: `send_otp`
+## 3. 账号和渠道规则
 
-### `send_otp` (action)
-- Tool: `send_otp`
-- Requires: `purchase_account_phone`
-- Guard failure: `ask_purchase_phone`
-- Transitions:
-  - `sent` → `ask_otp`
-  - `rate_limited` → `escalate`
-  - `error` → `escalate`
+- 用户说“当前账号”只产生普通 Slot Proposal，不等同于认证成功；
+- 非当前账号必须走手机号、OTP 和目标账号绑定流程；
+- 修改手机号会使认证 Artifact 和当前确认失效；
+- first-party 订阅可以调用本方取消工具；
+- Apple 或 Google Play 订阅进入对应平台说明路径，不调用错误渠道的取消工具。
 
-### `ask_otp` (ask)
-- Prompt: 验证码已发送，请在安全输入区域输入验证码。
-- Collects: `otp_code`
-- Next: `verify_otp`
+## 4. 确认和副作用
 
-### `verify_otp` (action)
-- Tool: `verify_otp`
-- Requires: `purchase_account_phone, otp_code`
-- Guard failure: `ask_otp`
-- Transitions:
-  - `verified` → `find_subscription`
-  - `failed` → `ask_otp`
-  - `expired` → `ask_otp`
-  - `error` → `escalate`
+确认 ask：
 
-### `find_subscription` (action)
-- Tool: `find_subscription`
-- Requires: `target_account_verified`
-- Guard failure: `verify_otp`
-- Transitions:
-  - `found` → `route_by_channel`
-  - `not_found` → `ask_subscription_hint`
-  - `error` → `escalate`
+```text
+kind=confirmation
+fields=[slots.cancel_confirmed]
+accepts=[answer, cancel]
+```
 
-### `ask_subscription_hint` (ask)
-- Prompt: 暂时没有找到匹配的订阅。请核对购买渠道或订阅信息。
-- Collects: `subscription_hint, purchase_channel_hint`
-- Next: `find_subscription`
+用户回答“是”只产生当前确认 Proposal。Engine 只有在以下条件全部满足时才能调用取消工具：
 
-### `route_by_channel` (branch)
-- If `subscription.channel == 'first_party'` → `confirm_cancel`
-- If `subscription.channel == 'apple'` → `guide_apple`
-- If `subscription.channel == 'google_play'` → `guide_google_play`
-- Default → `guide_other_store`
+- 目标账号认证结果仍 valid；
+- 订阅 Artifact 仍 valid；
+- 渠道 Policy 允许本方取消；
+- `cancel_confirmed=true`；
+- 当前 revision 和 interaction ID 有效。
 
-### `confirm_cancel` (ask)
-- Prompt: 我找到一个由本系统管理的订阅。关闭自动续费后，当前有效期仍可使用。确认关闭吗？
-- Collects: `confirm_cancel`
-- Next: `cancellation_confirmation_gate`
+取消工具必须携带幂等键。重复提交同一个 Command 只能返回原 Decision，不能产生第二次外部取消。
 
-### `cancellation_confirmation_gate` (branch)
-- If `confirm_cancel == true` → `cancel_subscription`
-- Default → `cancel_declined`
+## 5. 特殊回答
 
-### `cancel_subscription` (action)
-- Tool: `cancel_subscription`
-- Requires: `target_account_verified, subscription.id, confirm_cancel`
-- Guard failure: `escalate`
-- Transitions:
-  - `cancelled` → `report_cancelled`
-  - `already_disabled` → `report_already_disabled`
-  - `error` → `escalate`
+| 用户表达 | Model Candidate | Engine 处理 |
+|---|---|---|
+| “是” | 当前确认 Proposal，single、explicit、true | 进入取消工具前置检查 |
+| “否” | 当前确认 Proposal，single、explicit、false | 进入保留订阅或结束路径 |
+| “算了” | `cancel_interaction` | 取消当前 ask，不取消订阅 |
+| “不记得了” | `unable_to_answer` | 按 Workflow 的替代路径处理 |
 
-### `guide_apple` (respond)
-- Template: 该订阅由 Apple 管理。请在 Apple 账号的订阅设置中关闭续费；本系统无法代为取消。
-- Next: `done`
+用户说“另外帮我退款”时，Harness 交付 `refund_request` Business Intent。Router 决定是否新建或排队，不由模型决定。
 
-### `guide_google_play` (respond)
-- Template: 该订阅由 Google Play 管理。请在 Google Play 的订阅设置中关闭续费；本系统无法代为取消。
-- Next: `done`
+## 6. 终态
 
-### `guide_other_store` (respond)
-- Template: 该订阅需要通过购买渠道 {{ subscription.channel }} 管理。本系统无法代为取消。
-- Next: `done`
-
-### `cancel_declined` (respond)
-- Template: 好的，我没有关闭自动续费。
-- Next: `done`
-
-### `report_cancelled` (respond)
-- Template: 自动续费已关闭。当前有效期状态：{{ subscription.status }}。这次操作没有提交退款。
-- Next: `done`
-
-### `report_already_disabled` (respond)
-- Template: 系统显示该订阅的自动续费已经关闭。此操作没有提交退款。
-- Next: `done`
-
-### `escalate` (action)
-- Tool: `create_handoff`
-- Requires: `none`
-- Guard failure: `handoff_failed`
-- Transitions:
-  - `created` → `wait_for_human`
-  - `error` → `handoff_failed`
-
-### `wait_for_human` (wait)
-- Event: `human_case_updated`
-
-### `handoff_failed` (respond)
-- Template: 暂时无法连接人工客服，请稍后重试。
-
-### `done` (end)
+| 终态 | 条件 |
+|---|---|
+| `cancelled` | 本方取消工具成功 |
+| `platform_redirect` | 订阅属于 Apple 或 Google Play |
+| `kept_active` | 用户拒绝或取消当前确认 |
+| `manual_review` | 认证、查询或取消工具要求人工处理 |

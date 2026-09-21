@@ -1,7 +1,7 @@
 # Workflow Definition 规范
 
 状态：Draft
-规范版本：0.1.0
+规范版本：0.2.0
 
 本文定义一种可移植、可校验、可确定性执行的 Workflow Definition 格式。它面向长期演进，不依赖任何现有代码、存储方案或 Agent 框架。
 
@@ -23,6 +23,7 @@
 | Engine | 读取 Definition、接收结构化事件并确定性更新 Runtime State 的执行组件 |
 | Node | 流程中的一个步骤，例如询问用户、调用工具、判断条件或结束实例 |
 | Slot | 允许用户、调用方、可信事件或系统默认值提供和修改的业务变量 |
+| Proposal | Harness 从用户消息提取的尚未被 Workflow 接受的候选值、候选集合及其关系；它不属于 Definition 的运行时 Slot 值 |
 | Artifact | Node 或工具运行后产生的派生结果，外部用户不能直接写入 |
 | data reference | 带命名空间的数据地址，例如 `slots.departure_date` 或 `artifacts.flight_search` |
 | Transition | 一个 Node 完成后选择下一个 Node 的控制流规则 |
@@ -139,7 +140,7 @@ Definition 使用 MAJOR.MINOR.PATCH 语义化版本。已启动的 Workflow Inst
 
 ~~~json
 {
-  "spec_version": "0.1",
+  "spec_version": "0.2",
   "id": "flight_booking",
   "version": "1.0.0",
   "title": "预订机票",
@@ -209,11 +210,21 @@ Slot 是 Workflow Instance 中允许外部主体提供、选择或修改的数�
 | required | boolean | 是 | 成功终态前是否必须有有效值；不表示启动时必须提供 |
 | source | array<enum> | 是 | 至少一项且不得重复；只允许 `user`、`caller`、`event` 或 `system_default` |
 | mutable | enum | 是 | 只允许 `never`、`always` 或 `until_irreversible_effect` |
+| cardinality | enum | 否 | 只允许 `single` 或 `set`；省略时为 `single` |
+| proposal_resolution | enum | 否 | 只允许 `user_must_choose`、`system_may_choose` 或 `backend_may_filter`；省略时为 `user_must_choose` |
+| selection_policy | object | `proposal_resolution=system_may_choose` 时 | 已注册的确定性代选规则；没有规则时不能从多个候选中默认选第一个 |
 | default | 与 type 一致 | 否 | 确定性默认规范值；必须通过类型校验，且 `source` 包含 `system_default` |
 | sensitive | boolean | 否 | 是否限制展示、日志和访问权限；省略等同于 `false` |
 | retention | enum | 否 | 只允许 `turn`、`instance`、`audit` 或 `none`；省略时由部署的数据治理策略决定 |
 
 required 不表示 Workflow 启动时必须已有该值。节点可以在真正使用之前收集它。
+
+`cardinality` 和 `proposal_resolution` 决定 Engine 如何处理 Model Proposal：
+
+- `single + user_must_choose`：候选超过一个时保存 Proposal 并继续澄清，不能写入 Slot；
+- `single + system_may_choose`：只有存在已注册 `selection_policy` 时才能确定一个值；
+- `set + backend_may_filter`：可以把候选集合交给查询或过滤工具，工具返回确定结果后再写入最终 Slot；
+- Proposal 的 `commitment=explicit` 也必须通过这些规则，不能绕过 cardinality。
 
 `field_ref` 是对共享字段语义的可选引用。没有 `field_ref` 时，Slot 使用本 Definition 中的 `type`、`schema` 和其他声明；有 `field_ref` 时，Loader 必须校验两边的类型、Schema、敏感级别和规范化规则一致。`field_ref` 不会自动改变 Slot 的 `source`、`mutable`、`retention`，也不会让该 Slot 自动出现在任何 Intent 的 `allowed_entities` 中。
 
@@ -391,6 +402,8 @@ request 字段：
 `accepts` 至少包含 `answer`，元素只能是 `answer`、`cancel` 或 `unable_to_answer` 且不得重复。若包含某个事件，`on` 中必须存在同名目标；`unable_to_answer` 用于用户明确表示无法提供当前问题所需的信息，不等同于取消。
 
 on 必须覆盖 accepts 中所有会结束本次等待的事件。answer 事件只能写入 request.fields 和 node.outputs 共同声明的 slots，并且写入值必须通过 Slot 类型与来源校验。unable_to_answer 事件不得写入 request.fields；它通常进入补充信息、替代验证或人工处理节点。
+
+在当前规范版本中，`answer` 为单次确定值提交。用户说“明天后天都行”或“米饭、小米粥都可以”时，不能把多个候选直接写入一个单值 Slot，也不能由 Engine 默认选择第一个。Workflow 如果要支持候选集合，必须显式定义可保存候选集合的 Slot 类型、查询接口和代选 Policy；在这些能力未声明前，Harness 应保留候选并继续澄清或按已声明 Policy 代选。
 
 slot.change 是 Workflow Instance 的全局标准事件，不需要加入 accepts，也不通过 on.modify 跳转。Engine 必须先按第 14 章处理修改、失效和重算。
 
@@ -1095,7 +1108,7 @@ Policy 在匹配 trigger 的事件事务中执行：
 
 ~~~json
 {
-  "spec_version": "0.1",
+      "spec_version": "0.2",
   "id": "flight_booking",
   "version": "1.0.0",
   "entry": "collect_trip",
